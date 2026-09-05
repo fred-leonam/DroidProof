@@ -5,7 +5,28 @@
 DroidProof is a planned open-source Android verification harness that will turn test executions into artifact-bound, human-readable, and machine-readable evidence. It will correlate application identity, device configuration, UI state, screenshots, semantics, logs, and network activity to show how a specific Android build behaved under a defined scenario.
 
 > [!IMPORTANT]
-> DroidProof is currently in the architecture and early-development phase. The APIs, modules, and commands below describe the intended direction and are not yet available as a stable release.
+> DroidProof is currently in early development. The JVM-only evidence core is implemented; the Android-facing APIs and modules below remain planned and are not yet available as a stable release.
+
+## Current implementation
+
+The first executable slice provides platform-independent Kotlin/JVM modules:
+
+- `droidproof-model` defines validated identities, a versioned evidence manifest, environment contract, and timeline events.
+- `droidproof-evidence` computes streaming SHA-256 digests and writes deterministic, human-readable `manifest.json` and `timeline.json` bundles.
+
+Build and test it with JDK 17:
+
+```bash
+./gradlew check
+```
+
+Generate the deterministic checkout retry example:
+
+```bash
+./gradlew :droidproof-evidence:generateSampleEvidence
+```
+
+The generated bundle is at `droidproof-evidence/build/droidproof-samples/proof-checkout-offline-retry/`. It is build output and is not committed.
 
 ## Motivation
 
@@ -192,4 +213,3 @@ The first implementation is expected to use:
 ## Contributing
 
 DroidProof is currently being shaped through architecture experiments. Design discussions, use cases, failure scenarios, and feedback about Android verification workflows will be welcome once the initial repository structure is available.
-
