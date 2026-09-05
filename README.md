@@ -5,14 +5,16 @@
 DroidProof is a planned open-source Android verification harness that will turn test executions into artifact-bound, human-readable, and machine-readable evidence. It will correlate application identity, device configuration, UI state, screenshots, semantics, logs, and network activity to show how a specific Android build behaved under a defined scenario.
 
 > [!IMPORTANT]
-> DroidProof is currently in early development. The JVM-only evidence core is implemented; the Android-facing APIs and modules below remain planned and are not yet available as a stable release.
+> DroidProof is currently in early development. The JVM-only evidence model, bundle writer, and integrity verifier are implemented; Android-facing APIs remain planned and are not yet available as a stable release.
 
 ## Current implementation
 
-The first executable slice provides platform-independent Kotlin/JVM modules:
+The current executable slices provide platform-independent Kotlin/JVM modules:
 
-- `droidproof-model` defines validated identities, a versioned evidence manifest, environment contract, and timeline events.
-- `droidproof-evidence` computes streaming SHA-256 digests and writes deterministic, human-readable `manifest.json` and `timeline.json` bundles.
+- `droidproof-model` defines validated identities, portable bundle paths, schema-v2 evidence descriptors, an environment contract, and timeline events.
+- `droidproof-evidence` copies evidence through bounded buffers, calculates SHA-256 and byte size while streaming, writes bundles transactionally, and verifies existing bundles with structured issue codes.
+
+Schema version 2 binds every copied evidence file to the manifest. Inventory paths are deterministic and lexicographically ordered. Schema version 1 remains readable, but its verification result warns that file integrity is unavailable instead of claiming success for checks that format cannot support. See [ADR 0002](docs/adr/0002-evidence-file-integrity.md) for the compatibility and path-safety policy.
 
 Build and test it with JDK 17:
 
@@ -27,6 +29,19 @@ Generate the deterministic checkout retry example:
 ```
 
 The generated bundle is at `droidproof-evidence/build/droidproof-samples/proof-checkout-offline-retry/`. It is build output and is not committed.
+
+Verify a bundle programmatically:
+
+```kotlin
+val result = EvidenceBundleVerifier().verify(bundlePath)
+if (!result.isValid) {
+    result.errors.forEach { issue ->
+        println("${issue.code}: ${issue.path ?: "bundle"}: ${issue.message}")
+    }
+}
+```
+
+The sample generation task runs this verifier itself and fails if the generated bundle is invalid.
 
 ## Motivation
 
@@ -72,21 +87,17 @@ DroidProof will treat verification as three versioned inputs and one structured 
 Android artifact + scenario + environment contract -> evidence bundle
 ```
 
-An evidence bundle is expected to contain:
+The generated checkout retry bundle contains:
 
 ```text
 proof-checkout-offline-retry/
 ├── manifest.json
 ├── timeline.json
-├── junit-results.xml
-├── screenshots/
-├── semantics/
-├── network.har
-├── logcat.txt
-└── report.html
+└── network/
+    └── orders-attempt-2.json
 ```
 
-The manifest will bind the result to information such as:
+The schema-v2 manifest binds the result to information such as:
 
 - APK or App Bundle hash;
 - signing-certificate fingerprint;
@@ -96,6 +107,9 @@ The manifest will bind the result to information such as:
 - locale, orientation, and animation configuration;
 - random seed and controlled clock, when available;
 - DroidProof version.
+- copied evidence paths, media types, byte sizes, and SHA-256 digests.
+
+The repository does not yet execute Android applications or collect screenshots, semantics, logcat, or intercepted network traffic. The sample's network document is generated scenario evidence used to exercise the JVM bundle API. ADB, emulator control, a mock server, HTML reporting, and a CLI also remain unimplemented.
 
 ## Key differentiators
 

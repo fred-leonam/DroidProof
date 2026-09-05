@@ -1,7 +1,10 @@
 package io.github.fredleonam.droidproof.model
 
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import java.text.Normalizer
 import java.time.Instant
+import java.util.Locale
 
 /** A lower-case SHA-256 digest encoded as 64 hexadecimal characters. */
 @Serializable
@@ -110,7 +113,7 @@ data class DeviceInformation(
 ) {
     init {
         require(fingerprint.isNotBlank()) { "Device fingerprint must not be blank." }
-        require(apiLevel in 1..100) { "Android API level must be between 1 and 100." }
+        require(apiLevel > 0) { "Android API level must be positive." }
     }
 }
 
@@ -122,13 +125,13 @@ enum class Orientation {
 
 @Serializable
 data class AnimationConfiguration(
-    val windowScale: Int,
-    val transitionScale: Int,
-    val animatorScale: Int,
+    val windowScale: Double,
+    val transitionScale: Double,
+    val animatorScale: Double,
 ) {
     init {
-        require(windowScale >= 0 && transitionScale >= 0 && animatorScale >= 0) {
-            "Animation scales must not be negative."
+        require(listOf(windowScale, transitionScale, animatorScale).all { it.isFinite() && it >= 0.0 }) {
+            "Animation scales must be finite and non-negative."
         }
     }
 }
@@ -163,9 +166,60 @@ data class EvidenceBundleManifest(
     val scenario: ScenarioIdentity,
     val environment: EnvironmentContract,
     val droidProofVersion: DroidProofVersion,
+    val evidenceFiles: List<EvidenceFileDescriptor> = emptyList(),
 ) {
     init {
         require(schemaVersion >= 1) { "Schema version must be at least 1." }
+    }
+}
+
+/** A portable, normalized path below an evidence-bundle root. */
+@Serializable
+@JvmInline
+value class BundleRelativePath(val value: String) : Comparable<BundleRelativePath> {
+    init {
+        require(value == Normalizer.normalize(value, Normalizer.Form.NFC)) { "Bundle path must use Unicode NFC normalization." }
+        require(isSafeRelativePath(value)) { "Bundle path must be a safe, portable, non-empty relative path." }
+        require(value.lowercase(Locale.ROOT) !in RESERVED_BUNDLE_PATHS) { "Bundle path is reserved: $value" }
+    }
+
+    override fun compareTo(other: BundleRelativePath): Int = value.compareTo(other.value)
+
+    override fun toString(): String = value
+}
+
+@Serializable
+enum class EvidenceFileRole {
+    @SerialName("screenshot")
+    SCREENSHOT,
+
+    @SerialName("semantics")
+    SEMANTICS,
+
+    @SerialName("logcat")
+    LOGCAT,
+
+    @SerialName("network")
+    NETWORK,
+
+    @SerialName("test-result")
+    TEST_RESULT,
+
+    @SerialName("attachment")
+    ATTACHMENT,
+}
+
+@Serializable
+data class EvidenceFileDescriptor(
+    val path: BundleRelativePath,
+    val sha256: Sha256,
+    val byteSize: Long,
+    val mediaType: String,
+    val role: EvidenceFileRole? = null,
+) {
+    init {
+        require(byteSize >= 0) { "Evidence byte size must be non-negative." }
+        require(isValidMediaType(mediaType)) { "Evidence media type must be a valid type/subtype." }
     }
 }
 
@@ -181,12 +235,11 @@ enum class EventSource {
 /** A safe bundle-relative path to evidence captured by a later collector. */
 @Serializable
 data class EvidenceReference(
-    val path: String,
+    val path: BundleRelativePath,
     val mediaType: String? = null,
 ) {
     init {
-        require(isSafeRelativePath(path)) { "Evidence path must be a safe, non-empty relative path." }
-        require(mediaType == null || mediaType.matches(Regex("[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+"))) {
+        require(mediaType == null || isValidMediaType(mediaType)) {
             "Evidence media type must be a valid type/subtype."
         }
     }
@@ -215,7 +268,18 @@ data class TimelineDocument(val events: List<TimelineEvent>)
 
 fun isSafeRelativePath(path: String): Boolean {
     if (path.isBlank() || path.startsWith('/') || path.startsWith('\\') || path.contains('\\')) return false
-    return path.split('/').all { it.isNotBlank() && it != "." && it != ".." }
+    if (WINDOWS_DRIVE_PATH.matches(path)) return false
+    return path.split('/').all(::isPortablePathSegment)
+}
+
+fun isValidMediaType(value: String): Boolean = MEDIA_TYPE.matches(value)
+
+private fun isPortablePathSegment(segment: String): Boolean {
+    if (segment.isBlank() || segment == "." || segment == "..") return false
+    if (segment.last() == '.' || segment.last() == ' ') return false
+    if (segment.any { it.code < 32 || it in WINDOWS_INVALID_PATH_CHARACTERS }) return false
+    val baseName = segment.substringBefore('.').uppercase(Locale.ROOT)
+    return baseName !in WINDOWS_RESERVED_NAMES
 }
 
 private val SLUG = Regex("[a-z0-9]+(?:-[a-z0-9]+)*")
@@ -223,3 +287,10 @@ private val EVENT_ID = Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 private val GIT_COMMIT = Regex("[0-9a-f]{7,64}")
 private val VERSION = Regex("[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?")
 private val LOCALE = Regex("[a-zA-Z]{2,3}(?:-[a-zA-Z]{2})?(?:-[a-zA-Z0-9]{2,8})*")
+private val MEDIA_TYPE = Regex("[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+")
+private val WINDOWS_DRIVE_PATH = Regex("^[A-Za-z]:.*")
+private val WINDOWS_INVALID_PATH_CHARACTERS = setOf('<', '>', ':', '\"', '|', '?', '*')
+private val WINDOWS_RESERVED_NAMES =
+    setOf("CON", "PRN", "AUX", "NUL") +
+        (1..9).flatMap { listOf("COM$it", "LPT$it") }
+private val RESERVED_BUNDLE_PATHS = setOf("manifest.json", "timeline.json")
