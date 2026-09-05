@@ -107,7 +107,7 @@ class EvidenceBundleWriterTest {
 
     private fun manifest() =
         EvidenceBundleManifest(
-            schemaVersion = 1,
+            schemaVersion = 2,
             bundleId = BundleId("proof-checkout-offline-retry"),
             createdAt = UtcTimestamp("2026-09-04T12:00:00Z"),
             artifact = AndroidArtifactIdentity(AndroidArtifactType.APK, Sha256("a".repeat(64))),
@@ -118,7 +118,7 @@ class EvidenceBundleWriterTest {
                     DeviceInformation("google/sdk_gphone64_arm64/emu64a:15/test", 35),
                     "en-US",
                     Orientation.PORTRAIT,
-                    AnimationConfiguration(0, 0, 0),
+                    AnimationConfiguration(0.0, 0.0, 0.0),
                     42,
                 ),
             droidProofVersion = DroidProofVersion("0.1.0"),

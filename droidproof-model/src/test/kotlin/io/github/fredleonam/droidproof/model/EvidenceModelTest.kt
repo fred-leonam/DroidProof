@@ -2,6 +2,7 @@ package io.github.fredleonam.droidproof.model
 
 import kotlinx.serialization.json.Json
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
@@ -25,14 +26,36 @@ class EvidenceModelTest {
 
     @Test
     fun `rejects unsafe evidence paths`() {
-        assertFailsWith<IllegalArgumentException> { EvidenceReference("../logcat.txt") }
-        assertFailsWith<IllegalArgumentException> { EvidenceReference("/logcat.txt") }
+        assertFailsWith<IllegalArgumentException> { EvidenceReference(BundleRelativePath("../logcat.txt")) }
+        assertFailsWith<IllegalArgumentException> { EvidenceReference(BundleRelativePath("/logcat.txt")) }
+        assertFailsWith<IllegalArgumentException> { BundleRelativePath("logs\\logcat.txt") }
+        assertFailsWith<IllegalArgumentException> { BundleRelativePath("network//request.json") }
+        assertFailsWith<IllegalArgumentException> { BundleRelativePath("C:/evidence.txt") }
+        assertFailsWith<IllegalArgumentException> { BundleRelativePath("manifest.json") }
+    }
+
+    @Test
+    fun `accepts deterministic non-integer animation scales`() {
+        val animations = AnimationConfiguration(0.0, 0.5, 1.0)
+
+        assertEquals(
+            "{\"windowScale\":0.0,\"transitionScale\":0.5,\"animatorScale\":1.0}",
+            Json.encodeToString(AnimationConfiguration.serializer(), animations),
+        )
+        assertFailsWith<IllegalArgumentException> { animations.copy(windowScale = -0.1) }
+        assertFailsWith<IllegalArgumentException> { animations.copy(transitionScale = Double.NaN) }
+        assertFailsWith<IllegalArgumentException> { animations.copy(animatorScale = Double.POSITIVE_INFINITY) }
+    }
+
+    @Test
+    fun `accepts future positive Android API levels`() {
+        assertEquals(101, DeviceInformation("future/device", 101).apiLevel)
     }
 }
 
 internal fun sampleManifest() =
     EvidenceBundleManifest(
-        schemaVersion = 1,
+        schemaVersion = 2,
         bundleId = BundleId("proof-checkout-offline-retry"),
         createdAt = UtcTimestamp("2026-09-04T12:00:00Z"),
         artifact =
@@ -48,7 +71,7 @@ internal fun sampleManifest() =
                 device = DeviceInformation("google/sdk_gphone64_arm64/emu64a:15/AP3A.240905.015/1234567:userdebug/dev-keys", 35),
                 locale = "en-US",
                 orientation = Orientation.PORTRAIT,
-                animations = AnimationConfiguration(0, 0, 0),
+                animations = AnimationConfiguration(0.0, 0.5, 1.0),
                 randomSeed = 42,
                 controlledClock = ControlledClock(UtcTimestamp("2026-09-04T12:00:00Z"), true),
             ),
