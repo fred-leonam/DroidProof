@@ -7,10 +7,12 @@ import kotlinx.serialization.SerializationException
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.IOException
+import java.io.UncheckedIOException
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
@@ -39,6 +41,8 @@ enum class VerificationIssueCode {
     SYMBOLIC_LINK,
     NON_REGULAR_FILE,
     FILE_INTEGRITY_UNAVAILABLE,
+    DUPLICATE_EVENT_ID,
+    IO_ERROR,
 }
 
 data class VerificationIssue(
@@ -57,7 +61,17 @@ data class EvidenceBundleVerificationResult(
     val isValid: Boolean get() = errors.isEmpty()
 }
 
-class EvidenceBundleVerifier {
+internal open class VerificationFileOperations {
+    open fun size(path: Path): Long = Files.size(path)
+
+    open fun hash(path: Path): String = Sha256Calculator.calculate(path).value
+
+    open fun walk(path: Path): java.util.stream.Stream<Path> = Files.walk(path)
+}
+
+class EvidenceBundleVerifier internal constructor(private val files: VerificationFileOperations) {
+    constructor() : this(VerificationFileOperations())
+
     fun verify(bundle: Path): EvidenceBundleVerificationResult {
         val root = bundle.toAbsolutePath().normalize()
         val issues = mutableListOf<VerificationIssue>()
@@ -76,10 +90,14 @@ class EvidenceBundleVerifier {
             parseObject(timelineText, TIMELINE_FILE, issues)
                 ?: return EvidenceBundleVerificationResult(manifestObject.schemaVersion(), issues)
         val schemaVersion = manifestObject.schemaVersion()
+        if (schemaVersion == null) {
+            issues.error(VerificationIssueCode.MALFORMED_JSON, "schemaVersion must be an integer JSON number.", MANIFEST_FILE)
+            return EvidenceBundleVerificationResult(null, issues)
+        }
         if (schemaVersion !in setOf(1, CURRENT_SCHEMA_VERSION)) {
             issues.error(
                 VerificationIssueCode.UNSUPPORTED_SCHEMA,
-                "Unsupported evidence schema version: ${schemaVersion ?: "missing"}.",
+                "Unsupported evidence schema version: $schemaVersion.",
                 MANIFEST_FILE,
             )
             return EvidenceBundleVerificationResult(schemaVersion, issues)
@@ -104,6 +122,9 @@ class EvidenceBundleVerifier {
         val timeline =
             decodeTimeline(timelineObject, timelineText, issues)
                 ?: return EvidenceBundleVerificationResult(schemaVersion, issues)
+        timeline.events.groupingBy { it.id }.eachCount().filterValues { it > 1 }.keys.forEach { id ->
+            issues.error(VerificationIssueCode.DUPLICATE_EVENT_ID, "Timeline event ID is duplicated: $id.", TIMELINE_FILE)
+        }
         if (schemaVersion == 1) {
             issues.warning(
                 VerificationIssueCode.FILE_INTEGRITY_UNAVAILABLE,
@@ -129,7 +150,9 @@ class EvidenceBundleVerifier {
                 )
             }
         }
-        manifest.evidenceFiles.forEach { verifyEvidenceFile(root, it.path, it.byteSize, it.sha256.value, issues) }
+        manifest.evidenceFiles.forEach {
+            ioIssue(issues, it.path.value) { verifyEvidenceFile(root, it.path, it.byteSize, it.sha256.value, issues) }
+        }
         scanUnexpectedFiles(root, rawPaths.toSet(), issues)
         return EvidenceBundleVerificationResult(schemaVersion, issues)
     }
@@ -284,7 +307,7 @@ class EvidenceBundleVerifier {
             issues.error(VerificationIssueCode.NON_REGULAR_FILE, "Evidence path is not a regular file.", relativePath.value)
             return
         }
-        val actualSize = Files.size(path)
+        val actualSize = files.size(path)
         if (actualSize != expectedSize) {
             issues.error(
                 VerificationIssueCode.FILE_SIZE_MISMATCH,
@@ -292,7 +315,7 @@ class EvidenceBundleVerifier {
                 relativePath.value,
             )
         }
-        val actualSha256 = Sha256Calculator.calculate(path).value
+        val actualSha256 = files.hash(path)
         if (actualSha256 != expectedSha256) {
             issues.error(VerificationIssueCode.SHA256_MISMATCH, "Evidence SHA-256 does not match.", relativePath.value)
         }
@@ -303,14 +326,16 @@ class EvidenceBundleVerifier {
         registeredPaths: Set<String>,
         issues: MutableList<VerificationIssue>,
     ) {
-        if (!Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS)) return
-        Files.walk(root).use { paths ->
-            paths.filter { it != root && !Files.isDirectory(it, LinkOption.NOFOLLOW_LINKS) }.forEach { path ->
-                val relative = root.relativize(path).joinToString("/")
-                if (Files.isSymbolicLink(path) && relative !in registeredPaths) {
-                    issues.error(VerificationIssueCode.SYMBOLIC_LINK, "Unexpected symbolic link in bundle.", relative)
-                } else if (relative !in registeredPaths && relative !in CORE_FILES) {
-                    issues.error(VerificationIssueCode.UNEXPECTED_EVIDENCE_FILE, "File is not registered in inventory.", relative)
+        ioIssue(issues, null) {
+            if (!Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS)) return@ioIssue
+            files.walk(root).use { paths ->
+                paths.filter { it != root && !Files.isDirectory(it, LinkOption.NOFOLLOW_LINKS) }.forEach { path ->
+                    val relative = root.relativize(path).joinToString("/")
+                    if (Files.isSymbolicLink(path) && relative !in registeredPaths) {
+                        issues.error(VerificationIssueCode.SYMBOLIC_LINK, "Unexpected symbolic link in bundle.", relative)
+                    } else if (relative !in registeredPaths && relative !in CORE_FILES) {
+                        issues.error(VerificationIssueCode.UNEXPECTED_EVIDENCE_FILE, "File is not registered in inventory.", relative)
+                    }
                 }
             }
         }
@@ -333,7 +358,23 @@ class EvidenceBundleVerifier {
         return null
     }
 
-    private fun JsonObject.schemaVersion(): Int? = this["schemaVersion"]?.jsonPrimitive?.intOrNull
+    private fun JsonObject.schemaVersion(): Int? = (this["schemaVersion"] as? JsonPrimitive)?.takeUnless { it.isString }?.intOrNull
+
+    private inline fun ioIssue(
+        issues: MutableList<VerificationIssue>,
+        path: String?,
+        action: () -> Unit,
+    ) {
+        try {
+            action()
+        } catch (error: IOException) {
+            issues.error(VerificationIssueCode.IO_ERROR, "Bundle I/O failed: ${error.message}", path)
+        } catch (error: UncheckedIOException) {
+            issues.error(VerificationIssueCode.IO_ERROR, "Bundle traversal failed: ${error.cause?.message}", path)
+        } catch (error: SecurityException) {
+            issues.error(VerificationIssueCode.IO_ERROR, "Bundle access denied: ${error.message}", path)
+        }
+    }
 
     private fun MutableList<VerificationIssue>.error(
         code: VerificationIssueCode,

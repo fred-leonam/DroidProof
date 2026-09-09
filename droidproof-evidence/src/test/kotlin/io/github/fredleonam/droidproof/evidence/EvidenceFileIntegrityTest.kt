@@ -45,6 +45,59 @@ class EvidenceFileIntegrityTest {
     private val verifier = EvidenceBundleVerifier()
 
     @Test
+    fun `malformed schema fields return structured issues`() {
+        val bundle = temporaryDirectory.resolve("schema")
+        writer.write(EvidenceBundleRequest(manifest(), emptyList()), bundle)
+        val original = bundle.resolve("manifest.json").readText()
+        for (value in listOf(null, "null", "\"2\"", "true", "[]", "{}")) {
+            bundle.resolve("manifest.json").writeText(
+                if (value == null) {
+                    original.replace("\"schemaVersion\": 2,", "")
+                } else {
+                    original.replace("\"schemaVersion\": 2", "\"schemaVersion\": $value")
+                },
+            )
+            assertIssue(bundle, VerificationIssueCode.MALFORMED_JSON)
+        }
+    }
+
+    @Test
+    fun `duplicate on disk event IDs are rejected in both schemas`() {
+        val bundle = temporaryDirectory.resolve("duplicate-events")
+        writer.write(EvidenceBundleRequest(manifest(), emptyList()), bundle)
+        val event = TimelineEvent(EventId("duplicate"), manifest().createdAt, EventSource.HOST, "observed")
+        bundle.resolve("timeline.json").writeText(
+            evidenceJson.encodeToString(io.github.fredleonam.droidproof.model.TimelineDocument(listOf(event, event))),
+        )
+        for (version in listOf(2, 1)) {
+            bundle.resolve("manifest.json").writeText(evidenceJson.encodeToString(manifest().copy(schemaVersion = version)))
+            assertTrue(verifier.verify(bundle).issues.any { it.code.name == "DUPLICATE_EVENT_ID" })
+        }
+    }
+
+    @Test
+    fun `size hash and lazy traversal IO failures are structured`() {
+        val bundle = temporaryDirectory.resolve("io-failure")
+        writeInputsTo(bundle, EvidenceFileInput(source("input.txt", "bytes"), BundleRelativePath("file.txt"), "text/plain"))
+        for (operation in listOf("size", "hash", "walk", "lazy")) {
+            val injected =
+                object : VerificationFileOperations() {
+                    override fun size(path: Path): Long = if (operation == "size") throw IOException("size") else super.size(path)
+
+                    override fun hash(path: Path): String = if (operation == "hash") throw IOException("hash") else super.hash(path)
+
+                    override fun walk(path: Path): java.util.stream.Stream<Path> =
+                        when (operation) {
+                            "walk" -> throw IOException("walk")
+                            "lazy" -> super.walk(path).map { throw java.io.UncheckedIOException(IOException("lazy")) }
+                            else -> super.walk(path)
+                        }
+                }
+            assertTrue(EvidenceBundleVerifier(injected).verify(bundle).issues.any { it.code.name == "IO_ERROR" })
+        }
+    }
+
+    @Test
     fun `writes and verifies nested files with deterministic inventory and streamed metadata`() {
         val log = source("logcat.txt", "line one\nline two\n")
         val response = source("response.json", "{\"orderId\":42}\n")

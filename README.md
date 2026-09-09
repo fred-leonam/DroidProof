@@ -5,7 +5,7 @@
 DroidProof is a planned open-source Android verification harness that will turn test executions into artifact-bound, human-readable, and machine-readable evidence. It will correlate application identity, device configuration, UI state, screenshots, semantics, logs, and network activity to show how a specific Android build behaved under a defined scenario.
 
 > [!IMPORTANT]
-> DroidProof is currently in early development. The JVM-only evidence model, bundle writer, and integrity verifier are implemented; Android-facing APIs remain planned and are not yet available as a stable release.
+> DroidProof is currently in early development. The JVM evidence core and a read-only ADB device capture adapter are implemented. Artifact-bound Android scenario execution remains planned; these APIs are not yet a stable release.
 
 ## Current implementation
 
@@ -13,6 +13,7 @@ The current executable slices provide platform-independent Kotlin/JVM modules:
 
 - `droidproof-model` defines validated identities, portable bundle paths, schema-v2 evidence descriptors, an environment contract, and timeline events.
 - `droidproof-evidence` copies evidence through bounded buffers, calculates SHA-256 and byte size while streaming, writes bundles transactionally, and verifies existing bundles with structured issue codes.
+- `droidproof-device` collects observed device metadata, a display screenshot, and optional PID-filtered logcat through installed ADB Platform Tools. It depends on the model; the evidence core does not depend on device code.
 
 Schema version 2 binds every copied evidence file to the manifest. Inventory paths are deterministic and lexicographically ordered. Schema version 1 remains readable, but its verification result warns that file integrity is unavailable instead of claiming success for checks that format cannot support. See [ADR 0002](docs/adr/0002-evidence-file-integrity.md) for the compatibility and path-safety policy.
 
@@ -22,7 +23,9 @@ Build and test it with JDK 17:
 ./gradlew check
 ```
 
-Generate the deterministic checkout retry example:
+### 1. Synthetic bundle generation
+
+Generate the deterministic checkout retry example (no SDK or device required):
 
 ```bash
 ./gradlew :droidproof-evidence:generateSampleEvidence
@@ -42,6 +45,54 @@ if (!result.isValid) {
 ```
 
 The sample generation task runs this verifier itself and fails if the generated bundle is invalid.
+
+Hashes verify consistency against the supplied manifest, not authenticity or application correctness. Someone who can change both a file and its manifest can produce another self-consistent bundle. Bundle replacement provides rollback for caught installation failures using backup and rename; it is not a crash-atomic transaction.
+
+### 2. Real device capture
+
+Use an already-authorized test device or emulator and installed Android SDK Platform Tools. Confirm the serial belongs to the intended test device before collecting its display. Screenshots, device identity, and logs can contain sensitive information; keep captures local and do not upload them as CI artifacts.
+
+```bash
+# Replace emulator-5554 with the serial of your authorized test emulator/device.
+./gradlew :droidproof-device:captureDeviceEvidence \
+  -Pdroidproof.deviceSerial=emulator-5554
+
+# An explicit executable path may contain spaces; quote the whole property argument.
+./gradlew :droidproof-device:captureDeviceEvidence \
+  '-Pdroidproof.adbPath=/opt/Android SDK/platform-tools/adb' \
+  -Pdroidproof.deviceSerial=emulator-5554
+
+# Opt in to a bounded snapshot for a known positive process ID.
+./gradlew :droidproof-device:captureDeviceEvidence \
+  -Pdroidproof.deviceSerial=emulator-5554 \
+  -Pdroidproof.includeLogcat=true -Pdroidproof.pid=12345 \
+  -Pdroidproof.commandTimeoutMillis=15000 \
+  -Pdroidproof.textLimitBytes=65536 \
+  -Pdroidproof.screenshotLimitBytes=33554432 \
+  -Pdroidproof.logcatLimitBytes=1048576
+```
+
+All project properties are optional except `droidproof.pid` when logcat is enabled; omit PID when logcat is disabled. `deviceSerial` may be omitted only when exactly one device is listed, and it must be authorized and online. With multiple devices, offline and unauthorized entries still count toward ambiguity. The exact supplied serial is required when configured.
+
+ADB is resolved at task execution: `droidproof.adbPath` first (invalid explicit paths fail), then `ANDROID_HOME/platform-tools`, then legacy `ANDROID_SDK_ROOT/platform-tools`, then nonempty `PATH` entries. Windows uses `adb.exe`. DroidProof does not install tools, accept licenses, restart the shared ADB server, or change machine settings. Ordinary ADB clients may start the shared server if it is absent.
+
+The defaults for limits are shown above; timeout is per command, between 1 and 3,600,000 milliseconds, and byte limits are between 1 and 2,147,483,647. Text stdout and stderr are independently bounded; screenshot and logcat limits replace the stdout limit for those operations. PNG validation also caps decoded images at 16,777,216 pixels and 100,000 chunks. The task is explicit, never part of `check` or `test`, never up-to-date or restored from the build cache, and supports the repository's configuration cache. Missing ADB does not affect configuration or offline tests.
+
+Each invocation creates a fresh directory under `droidproof-device/build/droidproof-captures/` containing:
+
+- `capture.json`: collector schema version 1, observed metadata, host collection timestamps, outcomes, issues, relative file descriptors, and limitations;
+- `screenshots/display.png`: published only after a successful command and bounded PNG validation;
+- `logs/logcat.txt`: published only after an explicitly requested, successful, nonempty PID-filtered snapshot.
+
+Logcat is disabled by default. It uses `logcat -d --pid=<PID> -v threadtime` only after the device's help advertises PID filtering. Unsupported filtering never falls back to device-wide logs. Empty, failed, unsupported, and output-limited snapshots have distinct outcomes; partial logs are not published as complete. A log failure preserves a successful screenshot and makes the result partial. The Gradle task exits unsuccessfully for partial or failed captures and prints the output location. An output-root or `capture.json` write failure can prevent a result document; already published files remain local for inspection.
+
+PID reuse, process restarts, historical log retention, device permissions, and log filtering limit attribution. A snapshot contains only currently retained accessible records; it does not establish complete application history. No logs are cleared, apps started/stopped, or processes discovered. Host start/end timestamps use an injectable host clock and are collection observations, not application event times or a cross-process causal clock. A valid screenshot may show a blank/protected screen or another application. Secure-window restrictions are never bypassed, and no rendering correctness is inferred. Two real captures are not expected to be byte-identical.
+
+`DeviceCollector.capture(CaptureRequest(...))` returns `CaptureResult` with `CollectedFile` values. Each contains a local source `Path`, a validated `BundleRelativePath` destination, media type, and `EvidenceFileRole`. A future coordinator can map these into `EvidenceFileInput`; host absolute source paths are not serialized. The offline integration test exercises this mapping and verifies a schema-v2 bundle using explicitly synthetic manifest values.
+
+### 3. Future artifact-bound scenario execution
+
+`capture.json` is not an `EvidenceBundleManifest` and does not claim application execution or bundle verification. Schema v2 still requires application identity, scenario data, and an environment contract that this read-only adapter cannot truthfully supply. The next milestone is a coordinator that binds a known application artifact and explicit scenario/environment inputs to execution and collected evidence. See [ADR 0003](docs/adr/0003-android-device-capture.md) for the adapter boundary.
 
 ## Motivation
 
@@ -109,7 +160,7 @@ The schema-v2 manifest binds the result to information such as:
 - DroidProof version.
 - copied evidence paths, media types, byte sizes, and SHA-256 digests.
 
-The repository does not yet execute Android applications or collect screenshots, semantics, logcat, or intercepted network traffic. The sample's network document is generated scenario evidence used to exercise the JVM bundle API. ADB, emulator control, a mock server, HTML reporting, and a CLI also remain unimplemented.
+The repository can collect a real display screenshot and optional PID-filtered logcat, but does not yet execute Android application scenarios or collect semantics or intercepted network traffic. The sample's network document is synthetic scenario evidence used to exercise the JVM bundle API. Emulator lifecycle control, a mock server, HTML reporting, and a CLI remain unimplemented.
 
 ## Key differentiators
 
