@@ -1,0 +1,149 @@
+package io.github.fredleonam.droidproof.host
+
+import io.github.fredleonam.droidproof.model.BundleRelativePath
+import io.github.fredleonam.droidproof.model.EvidenceCompleteness
+import io.github.fredleonam.droidproof.model.ExecutionStatus
+import io.github.fredleonam.droidproof.model.ScenarioVerdict
+import io.github.fredleonam.droidproof.model.Sha256
+import kotlinx.serialization.Serializable
+import java.nio.file.Path
+
+@Serializable
+enum class ExecutionStage {
+    PREFLIGHT,
+    ARTIFACT_BINDING,
+    LAUNCH,
+    ASSERTION,
+    CAPTURE,
+    FINALIZATION,
+}
+
+@Serializable
+enum class StageStatus {
+    SUCCEEDED,
+    FAILED,
+    CANCELLED,
+    SKIPPED,
+}
+
+@Serializable
+data class StageOutcome(
+    val stage: ExecutionStage,
+    val status: StageStatus,
+    val startedAt: String,
+    val endedAt: String,
+    val detail: String? = null,
+)
+
+@Serializable
+data class HostObservation(
+    val timestamp: String,
+    val category: String,
+    val detail: String,
+)
+
+@Serializable
+enum class AssertionOutcome {
+    MATCHED,
+    NOT_MATCHED,
+    NOT_EVALUATED,
+}
+
+@Serializable
+data class AssertionDocument(
+    val outcome: AssertionOutcome,
+    val expectedPackage: String,
+    val expectedResourceId: String,
+    val expectedText: String,
+    val hierarchyPath: BundleRelativePath? = null,
+    val successfulHierarchyObservations: Int = 0,
+    val detail: String,
+)
+
+@Serializable
+data class ExecutionResultDocument(
+    val resultSchemaVersion: Int = 1,
+    val executionId: String,
+    val hostStartedAt: String,
+    val hostEndedAt: String,
+    val status: ExecutionStatus,
+    val verdict: ScenarioVerdict,
+    val evidenceCompleteness: EvidenceCompleteness,
+    val stages: List<StageOutcome>,
+    val observations: List<HostObservation>,
+    val assertion: AssertionDocument,
+    val primaryError: String? = null,
+    val finalizationError: String? = null,
+)
+
+@Serializable
+enum class InstallationAction {
+    NOT_ATTEMPTED,
+    INSTALLED_ABSENT_PACKAGE,
+    REUSED_MATCHING_INSTALLATION,
+    REPLACED_EXISTING_INSTALLATION,
+    REFUSED_DIFFERENT_INSTALLATION,
+}
+
+@Serializable
+data class InstalledArtifactObservation(
+    val observedAt: String,
+    val packagePaths: List<String>,
+    val sha256: Sha256? = null,
+    val unavailableReason: String? = null,
+)
+
+@Serializable
+data class ArtifactBindingDocument(
+    val bindingSchemaVersion: Int = 1,
+    val packageName: String,
+    val inputApkSha256: Sha256,
+    val action: InstallationAction,
+    val beforeLaunch: InstalledArtifactObservation? = null,
+    val afterCapture: InstalledArtifactObservation? = null,
+    val limitations: List<String> =
+        listOf(
+            "APK byte equality is observed at discrete points and is not continuous attestation against concurrent updates.",
+            "No signing-certificate fingerprint was collected; byte hashes do not authenticate the producer.",
+            "Only one application APK in the emulator primary user is supported.",
+        ),
+)
+
+data class SmokeRunResult(
+    val output: Path?,
+    val diagnostic: Path?,
+    val document: ExecutionResultDocument?,
+    val bundleIntegrityValid: Boolean,
+) {
+    val isSuccessful: Boolean
+        get() =
+            document?.status == ExecutionStatus.COMPLETED &&
+                document.verdict == ScenarioVerdict.PASSED &&
+                document.evidenceCompleteness == EvidenceCompleteness.COMPLETE &&
+                bundleIntegrityValid
+}
+
+fun interface CancellationSignal {
+    fun isCancelled(): Boolean
+}
+
+fun interface MonotonicClock {
+    fun nanoTime(): Long
+}
+
+fun interface ScenarioWaiter {
+    @Throws(InterruptedException::class)
+    fun delay(millis: Long)
+}
+
+internal object SystemCancellationSignal : CancellationSignal {
+    override fun isCancelled(): Boolean = Thread.currentThread().isInterrupted
+}
+
+internal object SystemMonotonicClock : MonotonicClock {
+    override fun nanoTime(): Long = System.nanoTime()
+}
+
+internal object ThreadScenarioWaiter : ScenarioWaiter {
+    override fun delay(millis: Long) = Thread.sleep(millis)
+}
