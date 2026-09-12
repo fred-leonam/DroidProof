@@ -4,6 +4,7 @@ import kotlinx.serialization.json.Json
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class EvidenceModelTest {
@@ -50,6 +51,53 @@ class EvidenceModelTest {
     @Test
     fun `accepts future positive Android API levels`() {
         assertEquals(101, DeviceInformation("future/device", 101).apiLevel)
+    }
+
+    @Test
+    fun `schema v3 records unavailable environment fields without invented values`() {
+        val unavailable = ObservedValue(unavailableReason = "Not collected.")
+        val manifest =
+            EvidenceBundleManifestV3(
+                schemaVersion = 3,
+                bundleId = BundleId("smoke-run"),
+                createdAt = UtcTimestamp("2026-09-04T12:00:00Z"),
+                artifact = AndroidArtifactIdentity(AndroidArtifactType.APK, Sha256("a".repeat(64))),
+                artifactBinding =
+                    ArtifactBindingSummary(
+                        "io.droidproof.smoke",
+                        Sha256("a".repeat(64)),
+                        status = ArtifactBindingStatus.NOT_ESTABLISHED,
+                        detailPath = BundleRelativePath("execution/artifact-binding.json"),
+                    ),
+                scenario = ScenarioIdentity(ScenarioId("smoke-ready"), Sha256("b".repeat(64))),
+                requestedConfiguration =
+                    RequestedExecutionConfiguration("emulator-5554", "io.droidproof.smoke", true, false),
+                observedEnvironment =
+                    ObservedExecutionEnvironment(
+                        unavailable,
+                        unavailable,
+                        unavailable,
+                        unavailable,
+                        unavailable,
+                        unavailable,
+                        unavailable,
+                    ),
+                execution =
+                    ExecutionSummary(
+                        ExecutionStatus.ERROR,
+                        ScenarioVerdict.NOT_EVALUATED,
+                        EvidenceCompleteness.PARTIAL,
+                        BundleRelativePath("execution/result.json"),
+                    ),
+                droidProofVersion = DroidProofVersion("0.1.0-SNAPSHOT"),
+            )
+
+        val encoded = Json.encodeToString(EvidenceBundleManifestV3.serializer(), manifest)
+
+        assertTrue(encoded.contains("\"unavailableReason\""))
+        assertFalse(encoded.contains("\"locale\":\"en-US\""))
+        assertFailsWith<IllegalArgumentException> { ObservedValue() }
+        assertFailsWith<IllegalArgumentException> { ObservedValue("value", "reason") }
     }
 }
 

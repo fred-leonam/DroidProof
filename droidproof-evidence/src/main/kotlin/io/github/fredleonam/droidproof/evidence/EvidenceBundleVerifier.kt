@@ -2,6 +2,8 @@ package io.github.fredleonam.droidproof.evidence
 
 import io.github.fredleonam.droidproof.model.BundleRelativePath
 import io.github.fredleonam.droidproof.model.EvidenceBundleManifest
+import io.github.fredleonam.droidproof.model.EvidenceBundleManifestV3
+import io.github.fredleonam.droidproof.model.EvidenceFileDescriptor
 import io.github.fredleonam.droidproof.model.TimelineDocument
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.decodeFromString
@@ -94,7 +96,7 @@ class EvidenceBundleVerifier internal constructor(private val files: Verificatio
             issues.error(VerificationIssueCode.MALFORMED_JSON, "schemaVersion must be an integer JSON number.", MANIFEST_FILE)
             return EvidenceBundleVerificationResult(null, issues)
         }
-        if (schemaVersion !in setOf(1, CURRENT_SCHEMA_VERSION)) {
+        if (schemaVersion !in setOf(1, V2_SCHEMA_VERSION, V3_SCHEMA_VERSION)) {
             issues.error(
                 VerificationIssueCode.UNSUPPORTED_SCHEMA,
                 "Unsupported evidence schema version: $schemaVersion.",
@@ -104,10 +106,14 @@ class EvidenceBundleVerifier internal constructor(private val files: Verificatio
         }
 
         var rawPaths = emptyList<String>()
-        if (schemaVersion == CURRENT_SCHEMA_VERSION) {
+        if (schemaVersion in setOf(V2_SCHEMA_VERSION, V3_SCHEMA_VERSION)) {
             val rawInventory = manifestObject["evidenceFiles"] as? JsonArray
             if (rawInventory == null) {
-                issues.error(VerificationIssueCode.MALFORMED_JSON, "Schema version 2 requires evidenceFiles.", MANIFEST_FILE)
+                issues.error(
+                    VerificationIssueCode.MALFORMED_JSON,
+                    "Schema version $schemaVersion requires evidenceFiles.",
+                    MANIFEST_FILE,
+                )
                 return EvidenceBundleVerificationResult(schemaVersion, issues)
             }
             rawPaths = validateRawInventoryPaths(rawInventory, issues)
@@ -118,7 +124,9 @@ class EvidenceBundleVerifier internal constructor(private val files: Verificatio
             }
         }
 
-        val manifest = decodeManifest(manifestText, issues) ?: return EvidenceBundleVerificationResult(schemaVersion, issues)
+        val manifest =
+            decodeManifest(schemaVersion, manifestText, issues)
+                ?: return EvidenceBundleVerificationResult(schemaVersion, issues)
         val timeline =
             decodeTimeline(timelineObject, timelineText, issues)
                 ?: return EvidenceBundleVerificationResult(schemaVersion, issues)
@@ -134,7 +142,11 @@ class EvidenceBundleVerifier internal constructor(private val files: Verificatio
         }
 
         val inventoryByPath = manifest.evidenceFiles.associateBy { it.path }
-        timeline.events.flatMap { it.evidence }.forEach { reference ->
+        val references =
+            timeline.events.flatMap { event ->
+                event.evidence.map { VerificationReference(it.path, it.mediaType) }
+            } + manifest.references.map { VerificationReference(it) }
+        references.forEach { reference ->
             val descriptor = inventoryByPath[reference.path]
             if (descriptor == null) {
                 issues.error(
@@ -197,11 +209,25 @@ class EvidenceBundleVerifier internal constructor(private val files: Verificatio
         }
 
     private fun decodeManifest(
+        schemaVersion: Int,
         text: String,
         issues: MutableList<VerificationIssue>,
-    ): EvidenceBundleManifest? =
+    ): DecodedManifest? =
         try {
-            evidenceJson.decodeFromString(text)
+            if (schemaVersion == V3_SCHEMA_VERSION) {
+                val manifest = evidenceJson.decodeFromString<EvidenceBundleManifestV3>(text)
+                DecodedManifest(
+                    manifest.evidenceFiles,
+                    listOfNotNull(
+                        manifest.artifactBinding.detailPath,
+                        manifest.execution.resultPath,
+                        manifest.execution.assertionHierarchyPath,
+                    ),
+                )
+            } else {
+                val manifest = evidenceJson.decodeFromString<EvidenceBundleManifest>(text)
+                DecodedManifest(manifest.evidenceFiles, emptyList())
+            }
         } catch (error: Exception) {
             issues.error(VerificationIssueCode.MALFORMED_JSON, "Invalid manifest: ${error.message}", MANIFEST_FILE)
             null
@@ -391,4 +417,14 @@ class EvidenceBundleVerifier internal constructor(private val files: Verificatio
     private companion object {
         val CORE_FILES = setOf(MANIFEST_FILE, TIMELINE_FILE)
     }
+
+    private data class DecodedManifest(
+        val evidenceFiles: List<EvidenceFileDescriptor>,
+        val references: List<BundleRelativePath>,
+    )
+
+    private data class VerificationReference(
+        val path: BundleRelativePath,
+        val mediaType: String? = null,
+    )
 }

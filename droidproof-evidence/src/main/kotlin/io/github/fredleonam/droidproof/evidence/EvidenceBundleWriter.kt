@@ -2,6 +2,7 @@ package io.github.fredleonam.droidproof.evidence
 
 import io.github.fredleonam.droidproof.model.BundleRelativePath
 import io.github.fredleonam.droidproof.model.EvidenceBundleManifest
+import io.github.fredleonam.droidproof.model.EvidenceBundleManifestV3
 import io.github.fredleonam.droidproof.model.EvidenceFileDescriptor
 import io.github.fredleonam.droidproof.model.EvidenceFileRole
 import io.github.fredleonam.droidproof.model.Sha256
@@ -25,7 +26,9 @@ import java.nio.file.attribute.BasicFileAttributes
 import java.security.MessageDigest
 import java.util.Locale
 
-const val CURRENT_SCHEMA_VERSION = 2
+const val V2_SCHEMA_VERSION = 2
+const val V3_SCHEMA_VERSION = 3
+const val CURRENT_SCHEMA_VERSION = V3_SCHEMA_VERSION
 const val MANIFEST_FILE = "manifest.json"
 const val TIMELINE_FILE = "timeline.json"
 
@@ -59,6 +62,12 @@ data class EvidenceBundleRequest(
     val evidenceFiles: List<EvidenceFileInput> = emptyList(),
 )
 
+data class EvidenceBundleRequestV3(
+    val manifest: EvidenceBundleManifestV3,
+    val events: List<TimelineEvent>,
+    val evidenceFiles: List<EvidenceFileInput> = emptyList(),
+)
+
 internal interface BundleFileOperations {
     fun moveDirectory(
         source: Path,
@@ -84,7 +93,7 @@ class EvidenceBundleWriter internal constructor(
 ) {
     constructor() : this(NioBundleFileOperations)
 
-    /** Compatibility overload for bundles without evidence files. New writes require schema version 2. */
+    /** Compatibility overload for schema-v2 bundles without evidence files. */
     fun write(
         destination: Path,
         manifest: EvidenceBundleManifest,
@@ -125,23 +134,87 @@ class EvidenceBundleWriter internal constructor(
         return target
     }
 
+    /** Fully constructs a schema-v3 execution bundle beside [destination] before installing it. */
+    fun write(
+        request: EvidenceBundleRequestV3,
+        destination: Path,
+        overwrite: Boolean = false,
+    ): Path {
+        validate(request)
+        val target = safeDestination(destination)
+        val parent = requireNotNull(target.parent) { "Bundle destination must have a parent directory." }
+        Files.createDirectories(parent)
+        if (Files.exists(target, LinkOption.NOFOLLOW_LINKS) && !overwrite) {
+            throw FileAlreadyExistsException(target.toString())
+        }
+        if (Files.exists(target, LinkOption.NOFOLLOW_LINKS) && !Files.isDirectory(target, LinkOption.NOFOLLOW_LINKS)) {
+            throw EvidenceBundleValidationException("Bundle destination is not a directory: $target")
+        }
+
+        val staging = Files.createTempDirectory(parent, ".droidproof-staging-")
+        try {
+            val inventory = request.evidenceFiles.map { copyEvidenceFile(staging, it) }.sortedBy { it.path.value }
+            val manifest = request.manifest.copy(evidenceFiles = inventory)
+            writeJsonDocuments(staging, evidenceJson.encodeToString(manifest), request.events)
+            val verification = EvidenceBundleVerifier().verify(staging)
+            if (!verification.isValid) {
+                throw EvidenceBundleValidationException("Constructed bundle failed verification: ${verification.issues}")
+            }
+            install(staging, target, overwrite)
+        } finally {
+            deleteTreeIfExists(staging)
+        }
+        return target
+    }
+
     fun validate(request: EvidenceBundleRequest) {
-        if (request.manifest.schemaVersion != CURRENT_SCHEMA_VERSION) {
+        if (request.manifest.schemaVersion != V2_SCHEMA_VERSION) {
             throw EvidenceBundleValidationException(
-                "Unsupported schema version ${request.manifest.schemaVersion}; expected $CURRENT_SCHEMA_VERSION.",
+                "Unsupported schema version ${request.manifest.schemaVersion}; expected $V2_SCHEMA_VERSION.",
             )
         }
         if (request.manifest.evidenceFiles.isNotEmpty()) {
             throw EvidenceBundleValidationException("Evidence inventory is generated from evidence-file inputs and must be empty.")
         }
-        val duplicateIds = request.events.groupingBy { it.id }.eachCount().filterValues { it > 1 }.keys
+        validateFiles(request.events, request.evidenceFiles)
+    }
+
+    fun validate(request: EvidenceBundleRequestV3) {
+        if (request.manifest.schemaVersion != V3_SCHEMA_VERSION) {
+            throw EvidenceBundleValidationException(
+                "Unsupported schema version ${request.manifest.schemaVersion}; expected $V3_SCHEMA_VERSION.",
+            )
+        }
+        if (request.manifest.evidenceFiles.isNotEmpty()) {
+            throw EvidenceBundleValidationException("Evidence inventory is generated from evidence-file inputs and must be empty.")
+        }
+        validateFiles(request.events, request.evidenceFiles)
+        val suppliedPaths = request.evidenceFiles.map { it.destination }.toSet()
+        val requiredReferences =
+            listOfNotNull(
+                request.manifest.artifactBinding.detailPath,
+                request.manifest.execution.resultPath,
+                request.manifest.execution.assertionHierarchyPath,
+            )
+        requiredReferences.forEach { reference ->
+            if (reference !in suppliedPaths) {
+                throw EvidenceBundleValidationException("Manifest reference is not supplied as an evidence file: $reference")
+            }
+        }
+    }
+
+    private fun validateFiles(
+        events: List<TimelineEvent>,
+        evidenceFiles: List<EvidenceFileInput>,
+    ) {
+        val duplicateIds = events.groupingBy { it.id }.eachCount().filterValues { it > 1 }.keys
         if (duplicateIds.isNotEmpty()) {
             throw EvidenceBundleValidationException("Timeline event IDs must be unique: $duplicateIds")
         }
 
         val mediaTypesByExactPath = mutableMapOf<String, String>()
         val portablePaths = mutableSetOf<String>()
-        request.evidenceFiles.forEach { input ->
+        evidenceFiles.forEach { input ->
             val path = input.destination.value
             val existingMediaType = mediaTypesByExactPath.putIfAbsent(path, input.mediaType)
             if (existingMediaType != null) {
@@ -156,8 +229,8 @@ class EvidenceBundleWriter internal constructor(
             validateSource(input.source)
         }
 
-        val inputsByPath = request.evidenceFiles.associateBy { it.destination }
-        request.events.flatMap { it.evidence }.forEach { reference ->
+        val inputsByPath = evidenceFiles.associateBy { it.destination }
+        events.flatMap { it.evidence }.forEach { reference ->
             val input =
                 inputsByPath[reference.path]
                     ?: throw EvidenceBundleValidationException(
@@ -223,10 +296,16 @@ class EvidenceBundleWriter internal constructor(
         directory: Path,
         manifest: EvidenceBundleManifest,
         events: List<TimelineEvent>,
+    ) = writeJsonDocuments(directory, evidenceJson.encodeToString(manifest), events)
+
+    private fun writeJsonDocuments(
+        directory: Path,
+        manifestJson: String,
+        events: List<TimelineEvent>,
     ) {
         Files.writeString(
             directory.resolve(MANIFEST_FILE),
-            evidenceJson.encodeToString(manifest) + "\n",
+            manifestJson + "\n",
             StandardCharsets.UTF_8,
         )
         Files.writeString(
