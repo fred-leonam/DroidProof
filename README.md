@@ -5,7 +5,7 @@
 DroidProof is a planned open-source Android verification harness that will turn test executions into artifact-bound, human-readable, and machine-readable evidence. It will correlate application identity, device configuration, UI state, screenshots, semantics, logs, and network activity to show how a specific Android build behaved under a defined scenario.
 
 > [!IMPORTANT]
-> DroidProof is currently in early development. The JVM evidence core and a read-only ADB device capture adapter are implemented. Artifact-bound Android scenario execution remains planned; these APIs are not yet a stable release.
+> DroidProof is currently in early development. The JVM evidence core, read-only ADB device capture adapter, and one narrow artifact-bound Android smoke scenario are implemented. These APIs are not yet a stable release.
 
 ## Current implementation
 
@@ -14,6 +14,7 @@ The current executable slices provide platform-independent Kotlin/JVM modules:
 - `droidproof-model` defines validated identities, portable bundle paths, schema-v2 evidence descriptors, an environment contract, and timeline events.
 - `droidproof-evidence` copies evidence through bounded buffers, calculates SHA-256 and byte size while streaming, writes bundles transactionally, and verifies existing bundles with structured issue codes.
 - `droidproof-device` collects observed device metadata, a display screenshot, and optional PID-filtered logcat through installed ADB Platform Tools. It depends on the model; the evidence core does not depend on device code.
+- `droidproof-host` executes one strict JSON smoke scenario against an explicitly selected test emulator, binds the installed APK bytes before and after observation, launches one activity, polls one accessibility node, and writes a verified schema-v3 bundle.
 
 Schema version 2 binds every copied evidence file to the manifest. Inventory paths are deterministic and lexicographically ordered. Schema version 1 remains readable, but its verification result warns that file integrity is unavailable instead of claiming success for checks that format cannot support. See [ADR 0002](docs/adr/0002-evidence-file-integrity.md) for the compatibility and path-safety policy.
 
@@ -90,9 +91,41 @@ PID reuse, process restarts, historical log retention, device permissions, and l
 
 `DeviceCollector.capture(CaptureRequest(...))` returns `CaptureResult` with `CollectedFile` values. Each contains a local source `Path`, a validated `BundleRelativePath` destination, media type, and `EvidenceFileRole`. A future coordinator can map these into `EvidenceFileInput`; host absolute source paths are not serialized. The offline integration test exercises this mapping and verifies a schema-v2 bundle using explicitly synthetic manifest values.
 
-### 3. Future artifact-bound scenario execution
+### 3. Artifact-bound smoke scenario
 
-`capture.json` is not an `EvidenceBundleManifest` and does not claim application execution or bundle verification. Schema v2 still requires application identity, scenario data, and an environment contract that this read-only adapter cannot truthfully supply. The next milestone is a coordinator that binds a known application artifact and explicit scenario/environment inputs to execution and collected evidence. See [ADR 0003](docs/adr/0003-android-device-capture.md) for the adapter boundary.
+The live task requires one local APK, one checked JSON scenario and the exact serial of an already-authorized test emulator. It never runs from `check` or `test`, never starts an emulator, and is never treated as up-to-date or restored from cache. Logcat stays disabled.
+
+Build the standalone sample separately. Android Gradle Plugin 8.8.2 requires Gradle 8.10.2 and JDK 17; the sample compiles against Android API level 35. Generate the disposable development key outside the repository:
+
+```bash
+keytool -genkeypair -keystore /tmp/droidproof-smoke-keystore.jks \
+  -storepass droidproof -keypass droidproof -alias droidproof-smoke \
+  -keyalg RSA -keysize 2048 -validity 3650 \
+  -dname 'CN=DroidProof Local Sample'
+
+DROIDPROOF_SAMPLE_STORE_PASSWORD=droidproof \
+DROIDPROOF_SAMPLE_KEY_PASSWORD=droidproof \
+./gradlew -p samples/smoke-app assembleRelease \
+  -Pdroidproof.sample.keystore=/tmp/droidproof-smoke-keystore.jks \
+  -Pdroidproof.sample.keyAlias=droidproof-smoke
+```
+
+Run the passing scenario after confirming the serial belongs to the intended test emulator:
+
+```bash
+./gradlew :droidproof-host:runSmokeScenario \
+  -Pdroidproof.apkPath=samples/smoke-app/build/outputs/apk/release/smoke-app-release.apk \
+  -Pdroidproof.scenarioPath=samples/smoke-app/scenarios/passing.json \
+  -Pdroidproof.deviceSerial=emulator-5554
+```
+
+Run the intentionally failing scenario by changing the scenario path to `samples/smoke-app/scenarios/failing.json`. That task is expected to exit unsuccessfully while preserving an integrity-valid failed-scenario bundle. Add `-Pdroidproof.replaceExisting=true` only when intentionally replacing different bytes already installed for the target package. Set `-Pdroidproof.adbPath=/absolute/path/to/adb` when discovery is unsuitable.
+
+Each invocation uses a fresh location below `droidproof-host/build/droidproof-runs/`. A published bundle contains `manifest.json`, `timeline.json`, the exact accepted `scenario/scenario.json`, execution and artifact-binding documents, the retained UI hierarchy, collector metadata and screenshot when available. The task succeeds only when execution completed, the assertion passed, required evidence is complete and bundle verification succeeded.
+
+Schema version 3 records requested configuration separately from observed environment values. Unknown locale, orientation, animation scales, random seed and application clock remain unavailable with reasons; no placeholder values are invented. `ScenarioIdentity.dataSha256` is the hash of the exact bytes stored at `scenario/scenario.json`. Schema v1/v2 reading and the schema-v2 synthetic writer remain supported. See [ADR 0004](docs/adr/0004-artifact-bound-android-smoke-execution.md).
+
+The verdict proves only that one package/resource-ID/exact-text node was exposed by the accessibility hierarchy for the identified APK at the recorded observation points. Screenshot and hierarchy are sequential observations. APK hash equality is not continuous attestation, hashes do not authenticate the producer, and no certificate fingerprint is claimed.
 
 ## Motivation
 
@@ -123,7 +156,7 @@ flowchart TB
 ### Components
 
 - **Gradle plugin:** discovers scenarios, resolves build variants, and exposes DroidProof tasks.
-- **Host coordinator:** controls the execution lifecycle and correlates events across processes.
+- **Host coordinator:** currently controls the narrow smoke execution lifecycle and correlates its host observations.
 - **Device adapter:** installs artifacts and controls emulators or physical devices.
 - **Mock server:** provides deterministic backend responses and controlled failure conditions.
 - **Optional application probe:** exposes selected test hooks in non-production builds.
@@ -160,7 +193,7 @@ The schema-v2 manifest binds the result to information such as:
 - DroidProof version.
 - copied evidence paths, media types, byte sizes, and SHA-256 digests.
 
-The repository can collect a real display screenshot and optional PID-filtered logcat, but does not yet execute Android application scenarios or collect semantics or intercepted network traffic. The sample's network document is synthetic scenario evidence used to exercise the JVM bundle API. Emulator lifecycle control, a mock server, HTML reporting, and a CLI remain unimplemented.
+The repository can also execute the single native smoke scenario described above. It does not support general scenario actions, Compose semantics or intercepted network traffic. The sample's network document remains synthetic scenario evidence used to exercise the JVM bundle API. Emulator lifecycle control, a mock server, HTML reporting, and a CLI remain unimplemented.
 
 ## Key differentiators
 
