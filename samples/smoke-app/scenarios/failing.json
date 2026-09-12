@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "smoke-app-wrong-text",
+  "expectedPackage": "io.github.fredleonam.droidproof.smokeapp",
+  "launchComponent": "io.github.fredleonam.droidproof.smokeapp/io.github.fredleonam.droidproof.smokeapp.MainActivity",
+  "expectedUi": {
+    "resourceId": "io.github.fredleonam.droidproof.smokeapp:id/status",
+    "text": "DroidProof intentionally wrong"
+  },
+  "assertionDeadlineMillis": 15000,
+  "pollIntervalMillis": 250
+}
