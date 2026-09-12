@@ -173,6 +173,130 @@ data class EvidenceBundleManifest(
     }
 }
 
+@Serializable
+enum class ArtifactBindingStatus {
+    MATCHED_BEFORE_AND_AFTER,
+    MATCHED_BEFORE_FINAL_CHECK_UNAVAILABLE,
+    MATCHED_BEFORE_FINAL_MISMATCH,
+    NOT_ESTABLISHED,
+}
+
+@Serializable
+enum class ScenarioVerdict {
+    PASSED,
+    FAILED,
+    NOT_EVALUATED,
+}
+
+@Serializable
+enum class ExecutionStatus {
+    COMPLETED,
+    ERROR,
+    CANCELLED,
+}
+
+@Serializable
+enum class EvidenceCompleteness {
+    COMPLETE,
+    PARTIAL,
+}
+
+@Serializable
+data class ObservedValue(
+    val value: String? = null,
+    val unavailableReason: String? = null,
+) {
+    init {
+        require((value == null) != (unavailableReason == null)) {
+            "An observation must contain either a value or an unavailable reason."
+        }
+        require(value == null || value.isNotBlank()) { "An observed value must not be blank." }
+        require(unavailableReason == null || unavailableReason.isNotBlank()) {
+            "An unavailable observation must include a reason."
+        }
+    }
+}
+
+@Serializable
+data class RequestedExecutionConfiguration(
+    val deviceSerial: String,
+    val packageName: String,
+    val primaryUserOnly: Boolean,
+    val replaceExisting: Boolean,
+) {
+    init {
+        require(deviceSerial.isNotBlank()) { "Requested device serial must not be blank." }
+        require(packageName.isNotBlank()) { "Requested package name must not be blank." }
+        require(primaryUserOnly) { "Schema version 3 supports only the emulator primary user." }
+    }
+}
+
+@Serializable
+data class ObservedExecutionEnvironment(
+    val buildFingerprint: ObservedValue,
+    val apiLevel: ObservedValue,
+    val locale: ObservedValue,
+    val orientation: ObservedValue,
+    val animations: ObservedValue,
+    val randomSeed: ObservedValue,
+    val controlledClock: ObservedValue,
+)
+
+@Serializable
+data class ArtifactBindingSummary(
+    val packageName: String,
+    val inputApkSha256: Sha256,
+    val installedApkSha256Before: Sha256? = null,
+    val installedApkSha256After: Sha256? = null,
+    val status: ArtifactBindingStatus,
+    val detailPath: BundleRelativePath,
+) {
+    init {
+        require(packageName.isNotBlank()) { "Artifact-binding package name must not be blank." }
+    }
+}
+
+@Serializable
+data class ExecutionSummary(
+    val status: ExecutionStatus,
+    val verdict: ScenarioVerdict,
+    val evidenceCompleteness: EvidenceCompleteness,
+    val resultPath: BundleRelativePath,
+    val assertionHierarchyPath: BundleRelativePath? = null,
+) {
+    init {
+        require(status == ExecutionStatus.COMPLETED || verdict == ScenarioVerdict.NOT_EVALUATED) {
+            "Errored or cancelled executions must not claim an evaluated scenario verdict."
+        }
+    }
+}
+
+@Serializable
+data class EvidenceBundleManifestV3(
+    val schemaVersion: Int,
+    val bundleId: BundleId,
+    val createdAt: UtcTimestamp,
+    val artifact: AndroidArtifactIdentity,
+    val artifactBinding: ArtifactBindingSummary,
+    val scenario: ScenarioIdentity,
+    val requestedConfiguration: RequestedExecutionConfiguration,
+    val observedEnvironment: ObservedExecutionEnvironment,
+    val execution: ExecutionSummary,
+    val droidProofVersion: DroidProofVersion,
+    val evidenceFiles: List<EvidenceFileDescriptor> = emptyList(),
+) {
+    init {
+        require(schemaVersion == 3) { "Execution evidence manifest schema version must be 3." }
+        require(artifact.type == AndroidArtifactType.APK) { "Schema version 3 supports one APK artifact." }
+        require(artifact.sha256 == artifactBinding.inputApkSha256) {
+            "Artifact identity and artifact-binding input digest must match."
+        }
+        require(requestedConfiguration.packageName == artifactBinding.packageName) {
+            "Requested package and artifact-binding package must match."
+        }
+    }
+}
+
 /** A portable, normalized path below an evidence-bundle root. */
 @Serializable
 @JvmInline
