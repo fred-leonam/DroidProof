@@ -22,6 +22,6 @@ The accepted input hierarchy uses `ui/steps/001-input-before.xml` (index varies)
 
 ## Sample and limitations
 
-The Android View sample adds an initially empty name field. Its action displays `Hello <name>` for a nonempty field and preserves the original action-completed text for an empty field. A new launch intent clears the sample field and resets status. Passing and intentionally wrong-assertion text scenarios accompany the unchanged v1 and tap-only scenarios.
+The Android View sample adds an initially empty name field. Its action displays `Hello <name>` for a nonempty field and preserves the original action-completed text for an empty field. A new launch intent clears the sample field and resets status. The canonical interactive pair and the older text-named pair cover passing and intentionally wrong final assertions; the schema-v1 scenarios remain unchanged for compatibility.
 
 A successful input command acknowledges dispatch, not focus or text delivery. Hierarchy selection, tapping, typing, assertion and screenshot capture are sequential observations; a concurrent UI change can alter the recipient. Only the following assertion supplies behavioral evidence. Existing field content is not cleared or replaced by DroidProof. Arbitrary Unicode, whitespace, secrets, IME control, keyboard hiding, key events and general automation remain out of scope.

@@ -14,7 +14,7 @@ The current executable slices provide platform-independent Kotlin/JVM modules:
 - `droidproof-model` defines validated identities, portable bundle paths, schema-v2 evidence descriptors, an environment contract, and timeline events.
 - `droidproof-evidence` copies evidence through bounded buffers, calculates SHA-256 and byte size while streaming, writes bundles transactionally, and verifies existing bundles with structured issue codes.
 - `droidproof-device` collects observed device metadata, a display screenshot, and optional PID-filtered logcat through installed ADB Platform Tools. It depends on the model; the evidence core does not depend on device code.
-- `droidproof-host` executes one strict JSON smoke scenario against an explicitly selected test emulator, binds the installed APK bytes before and after observation, launches one activity, polls one accessibility node, and writes a verified schema-v3 bundle.
+- `droidproof-host` executes one strict JSON smoke scenario against an explicitly selected test emulator, binds the installed APK bytes before and after observation, launches one activity, runs the narrow ordered schema-v2 actions `typeTextUiNode`, `tapUiNode`, and `assertUiNode`, and writes a verified schema-v3 bundle.
 
 Schema version 2 binds every copied evidence file to the manifest. Inventory paths are deterministic and lexicographically ordered. Schema version 1 remains readable, but its verification result warns that file integrity is unavailable instead of claiming success for checks that format cannot support. See [ADR 0002](docs/adr/0002-evidence-file-integrity.md) for the compatibility and path-safety policy.
 
@@ -110,31 +110,37 @@ DROIDPROOF_SAMPLE_KEY_PASSWORD=droidproof \
   -Pdroidproof.sample.keyAlias=droidproof-smoke
 ```
 
-Run the passing scenario after confirming the serial belongs to the intended test emulator:
+Run the schema-v2 interactive passing scenario after confirming the serial belongs to the intended test emulator:
 
 ```bash
 ./gradlew :droidproof-host:runSmokeScenario \
-  -Pdroidproof.apkPath=samples/smoke-app/build/outputs/apk/release/smoke-app-release.apk \
-  -Pdroidproof.scenarioPath=samples/smoke-app/scenarios/passing.json \
-  -Pdroidproof.deviceSerial=emulator-5554
+  -Pdroidproof.apkPath=samples/smoke-app/build/outputs/apk/release/DroidProofSmokeApp-release.apk \
+  -Pdroidproof.scenarioPath=samples/smoke-app/scenarios/interactive-passing.json \
+  -Pdroidproof.deviceSerial=emulator-5554 \
+  -Pdroidproof.adbPath=/home/user/Android/Sdk/platform-tools/adb
 ```
 
-Run the intentionally failing scenario by changing the scenario path to `samples/smoke-app/scenarios/failing.json`. That task is expected to exit unsuccessfully while preserving an integrity-valid failed-scenario bundle. Add `-Pdroidproof.replaceExisting=true` only when intentionally replacing different bytes already installed for the target package. Set `-Pdroidproof.adbPath=/absolute/path/to/adb` when discovery is unsuitable.
+Run the intentionally failing schema-v2 scenario by changing the path to `samples/smoke-app/scenarios/interactive-failing.json`. It performs the same text entry and tap, then expects the wrong greeting. The task is expected to exit unsuccessfully while preserving an integrity-valid failed-scenario bundle. The schema-v1 `passing.json` and `failing.json` scenarios remain checked in as backward-compatibility examples. Add `-Pdroidproof.replaceExisting=true` only when intentionally replacing different bytes already installed for the target package. Set `-Pdroidproof.adbPath=/absolute/path/to/adb` when discovery is unsuitable.
 
-Scenario schema v2 adds ordered `tapUiNode` and `assertUiNode` steps. Try
-`samples/smoke-app/scenarios/interactive-passing.json` to tap the sample action button
-and assert `DroidProof action completed`, or `interactive-failing.json` for an
-intentionally wrong final expectation. The existing v1 scenarios remain unchanged.
-V2 accepts 1–100 steps and requires a final assertion; tap selectors contain only a
-package-qualified resource ID. Assertion steps add exact text, `deadlineMillis`,
-and `pollIntervalMillis`. Unknown fields and types fail parsing.
+Scenario schema v2 supports only the ordered actions `typeTextUiNode`, `tapUiNode`,
+and `assertUiNode`. The checked-in interactive example enters `DroidProof42` into
+the exact package/resource-ID field, taps the exact action button, and asserts the
+exact greeting `Hello DroidProof42`. V2 accepts 1–100 steps and requires a final
+assertion. Text input is restricted to 1–128 ASCII letters, digits, `.`, `_`, `-`,
+and `@`; tap and input selectors contain only a package-qualified resource ID.
+Assertion steps add exact text, `deadlineMillis`, and `pollIntervalMillis`. Unknown
+fields and action types fail parsing. This is a deliberately narrow execution
+format, not a general-purpose scenario DSL.
 
 Execution result schema 2 records every step, including errors and skips. Valid
-step hierarchies are inventoried at `ui/steps/NNN-tap-before.xml` or
-`ui/steps/NNN-assert.xml` and referenced by timeline events. A tap error prevents
-later steps and makes the verdict `NOT_EVALUATED`; an observed assertion nonmatch
-remains `FAILED`. See [ADR 0005](docs/adr/0005-ordered-ui-steps.md) for the contract
-and interaction limits.
+step hierarchies are inventoried at `ui/steps/NNN-input-before.xml`,
+`ui/steps/NNN-tap-before.xml`, or `ui/steps/NNN-assert.xml` and referenced by typed
+timeline events. Text entry resolves a fresh hierarchy, taps the field to establish
+focus, then invokes bounded ADB text input. A mutation error prevents later steps
+and makes the verdict `NOT_EVALUATED`; an observed assertion nonmatch remains
+`FAILED`. See [ADR 0005](docs/adr/0005-ordered-ui-steps.md) and
+[ADR 0006](docs/adr/0006-bounded-ui-text-entry.md) for the contract and interaction
+limits.
 
 Each invocation uses a fresh location below `droidproof-host/build/droidproof-runs/`. A published bundle contains `manifest.json`, `timeline.json`, the exact accepted `scenario/scenario.json`, execution and artifact-binding documents, the retained UI hierarchy, collector metadata and screenshot when available. The task succeeds only when execution completed, the assertion passed, required evidence is complete and bundle verification succeeded.
 
@@ -208,7 +214,7 @@ The schema-v2 manifest binds the result to information such as:
 - DroidProof version.
 - copied evidence paths, media types, byte sizes, and SHA-256 digests.
 
-The repository can also execute the single native smoke scenario described above. It does not support general scenario actions, Compose semantics or intercepted network traffic. The sample's network document remains synthetic scenario evidence used to exercise the JVM bundle API. Emulator lifecycle control, a mock server, HTML reporting, and a CLI remain unimplemented.
+The repository can also execute the narrow native smoke scenario described above. Its scenario format supports only `typeTextUiNode`, `tapUiNode`, and `assertUiNode`; it does not provide a general-purpose scenario DSL, Compose semantics, or intercepted network traffic. The sample's network document remains synthetic scenario evidence used to exercise the JVM bundle API. Emulator lifecycle control, a mock server, HTML reporting, and a CLI remain unimplemented.
 
 ## Key differentiators
 
@@ -335,10 +341,10 @@ Schema v2 also accepts:
 {"type":"typeTextUiNode","resourceId":"io.github.fredleonam.droidproof.smokeapp:id/name","text":"DroidProof42"}
 ```
 
-Use `samples/smoke-app/scenarios/text-passing.json` with the existing
-`runSmokeScenario` task to enter the name, tap the action, and assert
-`Hello DroidProof42`. `text-failing.json` intentionally expects the wrong greeting.
-The existing v1 and tap-only scenarios remain available.
+The canonical demonstration is `samples/smoke-app/scenarios/interactive-passing.json`:
+it enters the name, taps the action, and asserts `Hello DroidProof42`.
+`interactive-failing.json` performs the same mutations and intentionally expects the
+wrong greeting. The existing v1 and older text-named examples remain available.
 
 Text is restricted to 1–128 ASCII letters, digits, `.`, `_`, `-`, and `@`.
 Use non-secret test data: the scenario and its requested text are preserved in
