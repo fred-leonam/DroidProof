@@ -97,7 +97,7 @@ class SmokeCoordinator(
             accepted = AcceptedInputs(scenario, artifact)
             val overallBudget =
                 scenario.scenario.orderedSteps.filterIsInstance<AssertUiNode>().sumOf { it.deadlineMillis } +
-                    scenario.scenario.orderedSteps.size * request.commandTimeoutMillis * 2 +
+                    scenario.scenario.orderedSteps.sumOf { it.stepType.deviceOperationCount } * request.commandTimeoutMillis +
                     request.commandTimeoutMillis * MAX_DEVICE_OPERATIONS +
                     FINALIZATION_BUDGET_MILLIS
             state.overallDeadlineNanos =
@@ -236,8 +236,8 @@ class SmokeCoordinator(
         try {
             for ((index, step) in scenario.orderedSteps.withIndex()) {
                 val started = wallClock.instant().toString()
-                val type = if (step is TapUiNode) StepType.TAP_UI_NODE else StepType.ASSERT_UI_NODE
-                val suffix = if (step is TapUiNode) "tap-before" else "assert"
+                val type = step.stepType
+                val suffix = type.hierarchySuffix
                 val path =
                     if (scenario.schemaVersion == 1) {
                         HIERARCHY_PATH
@@ -250,8 +250,8 @@ class SmokeCoordinator(
                     operationTimeout(request, state)
                     val stepDirectory = Files.createDirectories(workDirectory.resolve("steps/$index"))
                     when (step) {
-                        is TapUiNode -> {
-                            val local = stepDirectory.resolve("tap-before.xml")
+                        is TapUiNode, is TypeTextUiNode -> {
+                            val local = stepDirectory.resolve("$suffix.xml")
                             val remote = "/sdcard/Download/droidproof-${UUID.randomUUID()}.xml"
                             val dump =
                                 device.dumpHierarchy(
@@ -261,7 +261,7 @@ class SmokeCoordinator(
                                     operationTimeout(request, state),
                                     2L * 1024L * 1024L,
                                 )
-                            if (!dump.isSuccessful) abort("Tap hierarchy collection failed.", dump.failure)
+                            if (!dump.isSuccessful) abort("UI target hierarchy collection failed.", dump.failure)
                             // Retain only bounded, safely parsed XML, including an unresolved target observation.
                             val resolution = UiHierarchyParser().inspectTap(local, scenario.expectedPackage, step.resourceId)
                             state.stepFiles += EvidenceFileInput(local, path, "application/xml", EvidenceFileRole.SEMANTICS)
@@ -269,6 +269,10 @@ class SmokeCoordinator(
                             val coordinates = resolution.coordinatesOrThrow()
                             val tap = device.tap(request.deviceSerial, coordinates, operationTimeout(request, state))
                             if (!tap.isSuccessful) abort("UI tap command failed.", tap.failure)
+                            if (step is TypeTextUiNode) {
+                                val input = device.inputText(request.deviceSerial, step.text, operationTimeout(request, state))
+                                if (!input.isSuccessful) abort("UI text input command failed.", input.failure)
+                            }
                         }
                         is AssertUiNode -> {
                             val attempt =
@@ -330,7 +334,7 @@ class SmokeCoordinator(
             val now = wallClock.instant().toString()
             state.steps +=
                 StepOutcome(
-                    index + 1, if (step is TapUiNode) StepType.TAP_UI_NODE else StepType.ASSERT_UI_NODE,
+                    index + 1, step.stepType,
                     StepStatus.SKIPPED, now, now, "A prior outcome prevented this step from starting.",
                 )
         }
@@ -625,7 +629,7 @@ class SmokeCoordinator(
                             EventId("004-${step.index.toString().padStart(3, '0')}-step"),
                             UtcTimestamp(step.hostEndedAt),
                             EventSource.HOST,
-                            if (step.type == StepType.TAP_UI_NODE) "scenario.step.tap" else "scenario.step.assert",
+                            step.type.timelineEventType,
                             attributes = mapOf("index" to step.index.toString(), "status" to step.status.name),
                             evidence = step.hierarchyPath?.let { listOf(EvidenceReference(it, "application/xml")) }.orEmpty(),
                         )

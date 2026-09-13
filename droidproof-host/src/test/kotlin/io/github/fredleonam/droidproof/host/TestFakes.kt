@@ -16,6 +16,8 @@ internal open class FakeSmokeDevice : SmokeDeviceOperations {
     var installResult: DeviceCall<Unit> = DeviceCall(Unit)
     var launchResult: DeviceCall<Unit> = DeviceCall(Unit)
     var tapResult: DeviceCall<Unit> = DeviceCall(Unit)
+    var inputTextResult: DeviceCall<Unit> = DeviceCall(Unit)
+    var afterOperation: (String) -> Unit = {}
     val dumps = ArrayDeque<DumpResponse>()
 
     override fun preflight(
@@ -74,7 +76,18 @@ internal open class FakeSmokeDevice : SmokeDeviceOperations {
         timeoutMillis: Long,
     ): DeviceCall<Unit> {
         operations += "tap:$serial:${coordinates.x}:${coordinates.y}"
+        afterOperation("tap")
         return tapResult
+    }
+
+    override fun inputText(
+        serial: String,
+        text: String,
+        timeoutMillis: Long,
+    ): DeviceCall<Unit> {
+        operations += "input:$serial:$text"
+        afterOperation("input")
+        return inputTextResult
     }
 
     override fun dumpHierarchy(
@@ -88,6 +101,7 @@ internal open class FakeSmokeDevice : SmokeDeviceOperations {
         val response = if (dumps.isEmpty()) DumpResponse(NON_MATCHING_XML) else dumps.removeFirst()
         if (response.failure != null) return DeviceCall(failure = response.failure, detail = response.detail)
         response.bytes?.let { Files.write(destination, it) }
+        afterOperation("dump")
         return DeviceCall(Unit)
     }
 

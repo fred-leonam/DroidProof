@@ -326,3 +326,28 @@ The first implementation is expected to use:
 ## Contributing
 
 DroidProof is currently being shaped through architecture experiments. Design discussions, use cases, failure scenarios, and feedback about Android verification workflows will be welcome once the initial repository structure is available.
+
+### Bounded text-entry scenario
+
+Schema v2 also accepts:
+
+```json
+{"type":"typeTextUiNode","resourceId":"io.github.fredleonam.droidproof.smokeapp:id/name","text":"DroidProof42"}
+```
+
+Use `samples/smoke-app/scenarios/text-passing.json` with the existing
+`runSmokeScenario` task to enter the name, tap the action, and assert
+`Hello DroidProof42`. `text-failing.json` intentionally expects the wrong greeting.
+The existing v1 and tap-only scenarios remain available.
+
+Text is restricted to 1–128 ASCII letters, digits, `.`, `_`, `-`, and `@`.
+Use non-secret test data: the scenario and its requested text are preserved in
+evidence. Whitespace, controls and Unicode are rejected. DroidProof dumps and
+resolves one exact package/resource target, retains the hierarchy, taps its center
+to establish focus, and dispatches bounded text input. It does not clear existing
+text, manage the keyboard, or guarantee that dispatched input reached the view;
+the following assertion provides the behavioral observation.
+
+Input hierarchy evidence is hash/size-bound through the existing writer and
+referenced by the step and `scenario.step.type_text` timeline event. Timeline
+attributes do not repeat input text. See [ADR 0006](docs/adr/0006-bounded-ui-text-entry.md).
