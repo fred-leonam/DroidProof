@@ -121,6 +121,21 @@ Run the passing scenario after confirming the serial belongs to the intended tes
 
 Run the intentionally failing scenario by changing the scenario path to `samples/smoke-app/scenarios/failing.json`. That task is expected to exit unsuccessfully while preserving an integrity-valid failed-scenario bundle. Add `-Pdroidproof.replaceExisting=true` only when intentionally replacing different bytes already installed for the target package. Set `-Pdroidproof.adbPath=/absolute/path/to/adb` when discovery is unsuitable.
 
+Scenario schema v2 adds ordered `tapUiNode` and `assertUiNode` steps. Try
+`samples/smoke-app/scenarios/interactive-passing.json` to tap the sample action button
+and assert `DroidProof action completed`, or `interactive-failing.json` for an
+intentionally wrong final expectation. The existing v1 scenarios remain unchanged.
+V2 accepts 1–100 steps and requires a final assertion; tap selectors contain only a
+package-qualified resource ID. Assertion steps add exact text, `deadlineMillis`,
+and `pollIntervalMillis`. Unknown fields and types fail parsing.
+
+Execution result schema 2 records every step, including errors and skips. Valid
+step hierarchies are inventoried at `ui/steps/NNN-tap-before.xml` or
+`ui/steps/NNN-assert.xml` and referenced by timeline events. A tap error prevents
+later steps and makes the verdict `NOT_EVALUATED`; an observed assertion nonmatch
+remains `FAILED`. See [ADR 0005](docs/adr/0005-ordered-ui-steps.md) for the contract
+and interaction limits.
+
 Each invocation uses a fresh location below `droidproof-host/build/droidproof-runs/`. A published bundle contains `manifest.json`, `timeline.json`, the exact accepted `scenario/scenario.json`, execution and artifact-binding documents, the retained UI hierarchy, collector metadata and screenshot when available. The task succeeds only when execution completed, the assertion passed, required evidence is complete and bundle verification succeeded.
 
 Schema version 3 records requested configuration separately from observed environment values. Unknown locale, orientation, animation scales, random seed and application clock remain unavailable with reasons; no placeholder values are invented. `ScenarioIdentity.dataSha256` is the hash of the exact bytes stored at `scenario/scenario.json`. Schema v1/v2 reading and the schema-v2 synthetic writer remain supported. See [ADR 0004](docs/adr/0004-artifact-bound-android-smoke-execution.md).

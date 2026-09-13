@@ -76,7 +76,8 @@ class SmokeCoordinator(
     private val wallClock: Clock = Clock.systemUTC(),
     private val monotonicClock: MonotonicClock = SystemMonotonicClock,
     private val cancellation: CancellationSignal = SystemCancellationSignal,
-    private val assertionRunner: UiAssertionRunner = UiAssertionRunner(device),
+    private val assertionRunner: UiAssertionRunner =
+        UiAssertionRunner(device, monotonicClock = monotonicClock, cancellation = cancellation),
     private val idSource: () -> String = { UUID.randomUUID().toString() },
 ) {
     fun run(request: SmokeRunRequest): SmokeRunResult {
@@ -95,7 +96,8 @@ class SmokeCoordinator(
             val artifact = ArtifactBinder(device, wallClock).snapshot(request.apkPath, workDirectory)
             accepted = AcceptedInputs(scenario, artifact)
             val overallBudget =
-                scenario.scenario.assertionDeadlineMillis +
+                scenario.scenario.orderedSteps.filterIsInstance<AssertUiNode>().sumOf { it.deadlineMillis } +
+                    scenario.scenario.orderedSteps.size * request.commandTimeoutMillis * 2 +
                     request.commandTimeoutMillis * MAX_DEVICE_OPERATIONS +
                     FINALIZATION_BUDGET_MILLIS
             state.overallDeadlineNanos =
@@ -142,22 +144,15 @@ class SmokeCoordinator(
             state.skip(ExecutionStage.LAUNCH)
         }
 
-        var assertion: UiAssertionAttempt? = null
         if (state.canUseDevice() && inputs != null) {
-            assertion =
-                stage(state, ExecutionStage.ASSERTION) {
-                    assertionRunner.await(
-                        inputs.scenario.scenario,
-                        request.deviceSerial,
-                        workDirectory.resolve("hierarchies"),
-                    ) { assertionRemaining -> minOf(assertionRemaining, operationTimeout(request, state)) }
-                        .also { result ->
-                            if (result.error != null) throw RunAbort(result.error, result.cancelled)
-                        }
-                }
+            stage<Unit>(state, ExecutionStage.ASSERTION) {
+                executeSteps(request, state, inputs.scenario.scenario, workDirectory)
+            }
         } else {
             state.skip(ExecutionStage.ASSERTION)
+            inputs?.let { skipRemainingSteps(state, it.scenario.scenario) }
         }
+        val assertion = state.assertionAttempt
 
         var captureResult: CaptureResult? = null
         if (state.canUseDevice() && inputs != null) {
@@ -230,6 +225,115 @@ class SmokeCoordinator(
             )
         deleteWorkDirectory(workDirectory)
         return result
+    }
+
+    private fun executeSteps(
+        request: SmokeRunRequest,
+        state: MutableExecutionState,
+        scenario: ScenarioDefinition,
+        workDirectory: Path,
+    ) {
+        try {
+            for ((index, step) in scenario.orderedSteps.withIndex()) {
+                val started = wallClock.instant().toString()
+                val type = if (step is TapUiNode) StepType.TAP_UI_NODE else StepType.ASSERT_UI_NODE
+                val suffix = if (step is TapUiNode) "tap-before" else "assert"
+                val path =
+                    if (scenario.schemaVersion == 1) {
+                        HIERARCHY_PATH
+                    } else {
+                        BundleRelativePath("ui/steps/${(index + 1).toString().padStart(3, '0')}-$suffix.xml")
+                    }
+                var retained: BundleRelativePath? = null
+                var document: AssertionDocument? = null
+                try {
+                    operationTimeout(request, state)
+                    val stepDirectory = Files.createDirectories(workDirectory.resolve("steps/$index"))
+                    when (step) {
+                        is TapUiNode -> {
+                            val local = stepDirectory.resolve("tap-before.xml")
+                            val remote = "/sdcard/Download/droidproof-${UUID.randomUUID()}.xml"
+                            val dump =
+                                device.dumpHierarchy(
+                                    request.deviceSerial,
+                                    remote,
+                                    local,
+                                    operationTimeout(request, state),
+                                    2L * 1024L * 1024L,
+                                )
+                            if (!dump.isSuccessful) abort("Tap hierarchy collection failed.", dump.failure)
+                            // Retain only bounded, safely parsed XML, including an unresolved target observation.
+                            val resolution = UiHierarchyParser().inspectTap(local, scenario.expectedPackage, step.resourceId)
+                            state.stepFiles += EvidenceFileInput(local, path, "application/xml", EvidenceFileRole.SEMANTICS)
+                            retained = path
+                            val coordinates = resolution.coordinatesOrThrow()
+                            val tap = device.tap(request.deviceSerial, coordinates, operationTimeout(request, state))
+                            if (!tap.isSuccessful) abort("UI tap command failed.", tap.failure)
+                        }
+                        is AssertUiNode -> {
+                            val attempt =
+                                assertionRunner.await(
+                                    scenario.expectedPackage,
+                                    step,
+                                    request.deviceSerial,
+                                    stepDirectory,
+                                    path,
+                                ) { remaining -> minOf(remaining, operationTimeout(request, state)) }
+                            state.assertionAttempt = attempt
+                            document = attempt.document
+                            attempt.hierarchySource?.let {
+                                state.stepFiles += EvidenceFileInput(it, path, "application/xml", EvidenceFileRole.SEMANTICS)
+                                retained = path
+                            }
+                            if (attempt.error != null) throw RunAbort(attempt.error, attempt.cancelled)
+                        }
+                    }
+                    operationTimeout(request, state)
+                    val status =
+                        if (document?.outcome == AssertionOutcome.NOT_MATCHED) {
+                            StepStatus.ASSERTION_FAILED
+                        } else {
+                            StepStatus.SUCCEEDED
+                        }
+                    state.steps +=
+                        StepOutcome(
+                            index + 1, type, status, started, wallClock.instant().toString(), document?.detail, retained, document,
+                        )
+                    if (status == StepStatus.ASSERTION_FAILED) break
+                } catch (error: Exception) {
+                    val cancelled = error is RunAbort && error.cancelled
+                    val detail =
+                        when (error) {
+                            is RunAbort -> error.message ?: "Step execution failed."
+                            is HierarchyValidationException -> error.message ?: "UI hierarchy was invalid."
+                            else -> "Step execution failed before a trustworthy result was available."
+                        }
+                    state.steps +=
+                        StepOutcome(
+                            index + 1, type, if (cancelled) StepStatus.CANCELLED else StepStatus.ERROR,
+                            started, wallClock.instant().toString(), detail, retained, document,
+                        )
+                    throw RunAbort(detail, cancelled)
+                }
+            }
+        } finally {
+            skipRemainingSteps(state, scenario)
+        }
+    }
+
+    private fun skipRemainingSteps(
+        state: MutableExecutionState,
+        scenario: ScenarioDefinition,
+    ) {
+        for (index in state.steps.size until scenario.orderedSteps.size) {
+            val step = scenario.orderedSteps[index]
+            val now = wallClock.instant().toString()
+            state.steps +=
+                StepOutcome(
+                    index + 1, if (step is TapUiNode) StepType.TAP_UI_NODE else StepType.ASSERT_UI_NODE,
+                    StepStatus.SKIPPED, now, now, "A prior outcome prevented this step from starting.",
+                )
+        }
     }
 
     private fun captureStage(
@@ -331,8 +435,8 @@ class SmokeCoordinator(
                 ?: AssertionDocument(
                     AssertionOutcome.NOT_EVALUATED,
                     accepted.scenario.scenario.expectedPackage,
-                    accepted.scenario.scenario.expectedUi.resourceId,
-                    accepted.scenario.scenario.expectedUi.text,
+                    accepted.scenario.scenario.orderedSteps.filterIsInstance<AssertUiNode>().last().resourceId,
+                    accepted.scenario.scenario.orderedSteps.filterIsInstance<AssertUiNode>().last().text,
                     detail = state.primaryError ?: "Assertion was not reached.",
                 )
         val resultDocument =
@@ -343,6 +447,7 @@ class SmokeCoordinator(
                 status = status,
                 verdict = verdict,
                 evidenceCompleteness = completeness,
+                steps = state.steps.toList(),
                 stages = state.stages.toList(),
                 observations = state.observations.toList(),
                 assertion = assertionDocument,
@@ -356,7 +461,7 @@ class SmokeCoordinator(
                     accepted,
                     binding,
                     resultDocument,
-                    hierarchy,
+                    state.stepFiles,
                     captureResult,
                 )
             val manifest =
@@ -394,7 +499,7 @@ class SmokeCoordinator(
         accepted: AcceptedInputs,
         binding: ArtifactBindingDocument,
         result: ExecutionResultDocument,
-        hierarchy: Path?,
+        stepFiles: List<EvidenceFileInput>,
         captureResult: CaptureResult?,
     ): List<EvidenceFileInput> {
         val documents = Files.createDirectories(workDirectory.resolve("documents"))
@@ -407,7 +512,7 @@ class SmokeCoordinator(
                 EvidenceFileInput(resultFile, RESULT_PATH, "application/json", EvidenceFileRole.TEST_RESULT),
                 EvidenceFileInput(bindingFile, BINDING_PATH, "application/json", EvidenceFileRole.ATTACHMENT),
             )
-        hierarchy?.let { files += EvidenceFileInput(it, HIERARCHY_PATH, "application/xml", EvidenceFileRole.SEMANTICS) }
+        files += stepFiles
         captureResult?.let { captured ->
             files +=
                 EvidenceFileInput(
@@ -495,7 +600,7 @@ class SmokeCoordinator(
     }
 
     private fun timeline(result: ExecutionResultDocument): List<TimelineEvent> =
-        result.stages.mapIndexed { index, stage ->
+        result.stages.flatMap { stage ->
             val evidence =
                 when (stage.stage) {
                     ExecutionStage.ASSERTION ->
@@ -513,14 +618,30 @@ class SmokeCoordinator(
                     ExecutionStage.FINALIZATION -> listOf(EvidenceReference(RESULT_PATH, "application/json"))
                     else -> emptyList()
                 }
-            TimelineEvent(
-                EventId("%03d-%s".format(index + 1, stage.stage.name.lowercase())),
-                UtcTimestamp(stage.endedAt),
-                EventSource.HOST,
-                "execution.${stage.stage.name.lowercase()}",
-                attributes = mapOf("status" to stage.status.name),
-                evidence = evidence,
-            )
+            val stepEvents =
+                if (stage.stage == ExecutionStage.ASSERTION) {
+                    result.steps.map { step ->
+                        TimelineEvent(
+                            EventId("004-${step.index.toString().padStart(3, '0')}-step"),
+                            UtcTimestamp(step.hostEndedAt),
+                            EventSource.HOST,
+                            if (step.type == StepType.TAP_UI_NODE) "scenario.step.tap" else "scenario.step.assert",
+                            attributes = mapOf("index" to step.index.toString(), "status" to step.status.name),
+                            evidence = step.hierarchyPath?.let { listOf(EvidenceReference(it, "application/xml")) }.orEmpty(),
+                        )
+                    }
+                } else {
+                    emptyList()
+                }
+            stepEvents +
+                TimelineEvent(
+                    EventId("%03d-%s".format(stage.stage.ordinal + 1, stage.stage.name.lowercase())),
+                    UtcTimestamp(stage.endedAt),
+                    EventSource.HOST,
+                    "execution.${stage.stage.name.lowercase()}",
+                    attributes = mapOf("status" to stage.status.name),
+                    evidence = evidence,
+                )
         }
 
     private fun operationTimeout(
@@ -628,6 +749,9 @@ class SmokeCoordinator(
         private val now: () -> String,
     ) {
         val stages = mutableListOf<StageOutcome>()
+        val steps = mutableListOf<StepOutcome>()
+        val stepFiles = mutableListOf<EvidenceFileInput>()
+        var assertionAttempt: UiAssertionAttempt? = null
         val observations = mutableListOf<HostObservation>()
         var overallDeadlineNanos: Long? = null
         var primaryError: String? = null
