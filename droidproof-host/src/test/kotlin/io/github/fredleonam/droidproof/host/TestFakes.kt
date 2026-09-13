@@ -15,6 +15,7 @@ internal open class FakeSmokeDevice : SmokeDeviceOperations {
     var preflightResult: DeviceCall<Unit> = DeviceCall(Unit)
     var installResult: DeviceCall<Unit> = DeviceCall(Unit)
     var launchResult: DeviceCall<Unit> = DeviceCall(Unit)
+    var tapResult: DeviceCall<Unit> = DeviceCall(Unit)
     val dumps = ArrayDeque<DumpResponse>()
 
     override fun preflight(
@@ -65,6 +66,15 @@ internal open class FakeSmokeDevice : SmokeDeviceOperations {
     ): DeviceCall<Unit> {
         operations += "launch:$serial:$component"
         return launchResult
+    }
+
+    override fun tap(
+        serial: String,
+        coordinates: TapCoordinates,
+        timeoutMillis: Long,
+    ): DeviceCall<Unit> {
+        operations += "tap:$serial:${coordinates.x}:${coordinates.y}"
+        return tapResult
     }
 
     override fun dumpHierarchy(

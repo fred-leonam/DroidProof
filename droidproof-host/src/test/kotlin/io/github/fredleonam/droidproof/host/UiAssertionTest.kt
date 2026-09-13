@@ -119,6 +119,43 @@ class UiAssertionTest {
         assertEquals(AssertionOutcome.NOT_EVALUATED, run(stale).document.outcome)
     }
 
+    @Test
+    fun `tap resolves exact target and computes center without overflow`() {
+        val parser = UiHierarchyParser()
+        for ((bounds, coordinates) in listOf(
+            "[10,20][31,61]" to TapCoordinates(20, 40),
+            "[0,0][1,1]" to TapCoordinates(0, 0),
+            "[2147483640,2147483640][2147483647,2147483647]" to TapCoordinates(2147483643, 2147483643),
+        )) {
+            assertEquals(coordinates, parser.resolveTap(tapSource(bounds), PACKAGE, RESOURCE_ID))
+        }
+    }
+
+    @Test
+    fun `tap rejects missing ambiguous wrong package and invalid bounds`() {
+        val parser = UiHierarchyParser()
+        for (bounds in listOf("", "[1,2]", "[-1,0][10,20]", "[0,0][0,20]", "[3,4][2,6]", "[0,0][10,2147483648]", "[0,0][10,20]junk")) {
+            assertFailsWith<HierarchyValidationException> { parser.resolveTap(tapSource(bounds), PACKAGE, RESOURCE_ID) }
+        }
+        for (xml in listOf(
+            "<hierarchy/>",
+            "<hierarchy>" + TAP_NODE + TAP_NODE + "</hierarchy>",
+            "<hierarchy>" + TAP_NODE.replace("package=\"io.droidproof.smoke\"", "package=\"other.package\"") + "</hierarchy>",
+            "<hierarchy>",
+            "<!DOCTYPE x [<!ENTITY e SYSTEM \"file:///etc/passwd\">]><hierarchy>&e;</hierarchy>",
+        )) {
+            assertFailsWith<HierarchyValidationException> {
+                parser.resolveTap(source("invalid-tap.xml", xml.toByteArray()), PACKAGE, RESOURCE_ID)
+            }
+        }
+    }
+
+    private fun tapSource(bounds: String): Path =
+        source(
+            "tap.xml",
+            ("<hierarchy>" + TAP_NODE.replace("[10,20][30,60]", bounds) + "</hierarchy>").toByteArray(),
+        )
+
     private fun scenario(
         deadline: Long = 1000,
         poll: Long = 100,
@@ -138,6 +175,7 @@ class UiAssertionTest {
     ): Path = directory.resolve(name).also { Files.write(it, bytes) }
 
     private companion object {
+        const val TAP_NODE = """<node package="io.droidproof.smoke" resource-id="io.droidproof.smoke:id/status" bounds="[10,20][30,60]"/>"""
         const val PACKAGE = "io.droidproof.smoke"
         const val RESOURCE_ID = "$PACKAGE:id/status"
         const val TEXT = "DroidProof ready"

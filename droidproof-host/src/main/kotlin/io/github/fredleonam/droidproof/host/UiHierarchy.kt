@@ -23,28 +23,19 @@ class UiHierarchyParser(
     private val maxBytes: Long = DEFAULT_MAX_BYTES,
     private val maxNodes: Int = DEFAULT_MAX_NODES,
 ) {
+    init {
+        require(maxBytes in 1 until Int.MAX_VALUE.toLong()) { "Hierarchy byte limit is outside supported bounds." }
+        require(maxNodes > 0) { "Hierarchy node limit must be positive." }
+    }
+
     fun inspect(
         path: Path,
         expectedPackage: String,
         expectedResourceId: String,
         expectedText: String,
     ): HierarchyMatchResult {
-        if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) || Files.isSymbolicLink(path)) {
-            throw HierarchyValidationException("UI hierarchy must be a regular non-symbolic-link file.")
-        }
-        val size = Files.size(path)
-        if (size !in 1..maxBytes) throw HierarchyValidationException("UI hierarchy exceeds the accepted byte bounds.")
-
         val handler = MatchingNodeHandler(expectedPackage, expectedResourceId, expectedText, maxNodes)
-        try {
-            val factory = secureFactory()
-            val reader = factory.newSAXParser().xmlReader
-            reader.entityResolver = EntityResolver { _, _ -> throw SAXException("External entities are disabled.") }
-            reader.contentHandler = handler
-            Files.newInputStream(path).use { reader.parse(InputSource(it)) }
-        } catch (error: Exception) {
-            throw HierarchyValidationException("UI hierarchy XML is malformed or unsafe.", error)
-        }
+        parse(path, handler)
         val detail =
             if (handler.matched) {
                 "One accessibility node matched package, resource ID and exact text."
@@ -52,6 +43,65 @@ class UiHierarchyParser(
                 "No single accessibility node matched all three expected attributes."
             }
         return HierarchyMatchResult(handler.matched, handler.nodeCount, detail)
+    }
+
+    fun resolveTap(
+        path: Path,
+        expectedPackage: String,
+        resourceId: String,
+    ): TapCoordinates = inspectTap(path, expectedPackage, resourceId).coordinatesOrThrow()
+
+    fun inspectTap(
+        path: Path,
+        expectedPackage: String,
+        resourceId: String,
+    ): TapResolution {
+        if (!resourceId.startsWith("$expectedPackage:id/")) {
+            throw HierarchyValidationException("Tap resource ID does not belong to the expected package.")
+        }
+        val handler = MatchingNodeHandler(expectedPackage, resourceId, null, maxNodes)
+        parse(path, handler)
+        return try {
+            TapResolution(coordinates(handler))
+        } catch (error: HierarchyValidationException) {
+            TapResolution(detail = error.message)
+        }
+    }
+
+    private fun coordinates(handler: MatchingNodeHandler): TapCoordinates {
+        if (handler.matchCount != 1) throw HierarchyValidationException("Tap requires exactly one package/resource ID target.")
+        val bounds = handler.bounds ?: throw HierarchyValidationException("Tap target bounds are missing.")
+        val match = BOUNDS.matchEntire(bounds) ?: throw HierarchyValidationException("Tap target bounds are malformed.")
+        val values =
+            match.groupValues.drop(1).map {
+                it.toIntOrNull() ?: throw HierarchyValidationException("Tap target coordinates are outside supported bounds.")
+            }
+        val (left, top, right, bottom) = values
+        if (right <= left || bottom <= top) throw HierarchyValidationException("Tap target bounds must have positive area.")
+        return TapCoordinates(left + (right - left) / 2, top + (bottom - top) / 2)
+    }
+
+    private fun parse(
+        path: Path,
+        handler: MatchingNodeHandler,
+    ) {
+        if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) || Files.isSymbolicLink(path)) {
+            throw HierarchyValidationException("UI hierarchy must be a regular non-symbolic-link file.")
+        }
+        if (Files.size(path) !in 1..maxBytes) throw HierarchyValidationException("UI hierarchy exceeds the accepted byte bounds.")
+        try {
+            val reader = secureFactory().newSAXParser().xmlReader
+            reader.entityResolver = EntityResolver { _, _ -> throw SAXException("External entities are disabled.") }
+            reader.contentHandler = handler
+            reader.errorHandler = handler
+            Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS).use { input ->
+                val bytes = input.readNBytes((maxBytes + 1).toInt())
+                if (bytes.size > maxBytes) throw SAXException("UI hierarchy byte limit exceeded.")
+                reader.parse(InputSource(bytes.inputStream()))
+            }
+        } catch (error: Exception) {
+            throw HierarchyValidationException("UI hierarchy XML is malformed or unsafe.", error)
+        }
     }
 
     private fun secureFactory(): SAXParserFactory =
@@ -69,10 +119,13 @@ class UiHierarchyParser(
 private class MatchingNodeHandler(
     private val expectedPackage: String,
     private val expectedResourceId: String,
-    private val expectedText: String,
+    private val expectedText: String?,
     private val maxNodes: Int,
 ) : DefaultHandler() {
-    var matched = false
+    val matched: Boolean get() = matchCount > 0
+    var matchCount = 0
+        private set
+    var bounds: String? = null
         private set
     var nodeCount = 0
         private set
@@ -88,12 +141,26 @@ private class MatchingNodeHandler(
         if (nodeCount > maxNodes) throw SAXException("UI hierarchy node limit exceeded.")
         if (attributes.getValue("package") == expectedPackage &&
             attributes.getValue("resource-id") == expectedResourceId &&
-            attributes.getValue("text") == expectedText
+            (expectedText == null || attributes.getValue("text") == expectedText)
         ) {
-            matched = true
+            matchCount++
+            bounds = attributes.getValue("bounds")
         }
     }
 }
 
 private const val DEFAULT_MAX_BYTES = 2L * 1024L * 1024L
 private const val DEFAULT_MAX_NODES = 20_000
+
+data class TapCoordinates(val x: Int, val y: Int) {
+    init {
+        require(x >= 0 && y >= 0) { "Tap coordinates must be nonnegative." }
+    }
+}
+
+private val BOUNDS = Regex("""\[([0-9]+),([0-9]+)]\[([0-9]+),([0-9]+)]""")
+
+data class TapResolution(val coordinates: TapCoordinates? = null, val detail: String? = null) {
+    fun coordinatesOrThrow(): TapCoordinates =
+        coordinates ?: throw HierarchyValidationException(detail ?: "Tap target could not be resolved.")
+}

@@ -20,6 +20,7 @@ import io.github.fredleonam.droidproof.model.EvidenceCompleteness
 import io.github.fredleonam.droidproof.model.EvidenceFileRole
 import io.github.fredleonam.droidproof.model.ExecutionStatus
 import io.github.fredleonam.droidproof.model.ScenarioVerdict
+import io.github.fredleonam.droidproof.model.TimelineDocument
 import kotlinx.serialization.decodeFromString
 import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Files
@@ -185,6 +186,207 @@ class SmokeCoordinatorTest {
         }
     }
 
+    @Test
+    fun `interactive execution orders tap observation capture and final identity with bound step evidence`() {
+        val device = interactiveDevice()
+        val capture =
+            DeviceEvidenceCapture { request ->
+                device.operations += "capture"
+                completeCapture().capture(request)
+            }
+        val request = interactiveRequest("interactive")
+        val result = coordinator(device, capture).run(request)
+        val bundle = requireNotNull(result.output)
+        assertTrue(result.isSuccessful)
+        val operations = device.operations.map { it.substringBefore(':') }
+        assertEquals(
+            listOf("preflight", "paths", "install", "paths", "pull", "launch", "dump", "tap", "dump", "capture", "paths", "pull"),
+            operations,
+        )
+        assertTrue("tap:emulator-5554:20:40" in device.operations)
+        assertEquals(listOf(StepStatus.SUCCEEDED, StepStatus.SUCCEEDED), result.document?.steps?.map { it.status })
+        val manifest = evidenceJson.decodeFromString<EvidenceBundleManifestV3>(Files.readString(bundle.resolve("manifest.json")))
+        for (path in listOf("ui/steps/001-tap-before.xml", "ui/steps/002-assert.xml")) {
+            val descriptor = manifest.evidenceFiles.single { it.path.value == path }
+            assertEquals(Sha256Calculator.calculate(bundle.resolve(path)), descriptor.sha256)
+            assertEquals(Files.size(bundle.resolve(path)), descriptor.byteSize)
+            assertTrue(Files.readString(bundle.resolve("timeline.json")).contains(path))
+        }
+        assertContentEquals(Files.readAllBytes(request.scenarioPath), Files.readAllBytes(bundle.resolve("scenario/scenario.json")))
+        assertFalse(Files.readString(bundle.resolve("execution/result.json")).contains(directory.toString()))
+        assertTrue(EvidenceBundleVerifier().verify(bundle).isValid)
+    }
+
+    @Test
+    fun `interactive nonmatch is failed complete and integrity valid`() {
+        val device = interactiveDevice().apply { dumps.removeLast() }
+        val result = coordinator(device, completeCapture()).run(interactiveRequest("interactive-failed"))
+        assertEquals(ExecutionStatus.COMPLETED, result.document?.status)
+        assertEquals(ScenarioVerdict.FAILED, result.document?.verdict)
+        assertEquals(StepStatus.ASSERTION_FAILED, result.document?.steps?.last()?.status)
+        assertEquals(EvidenceCompleteness.COMPLETE, result.document?.evidenceCompleteness)
+        assertTrue(result.bundleIntegrityValid)
+    }
+
+    @Test
+    fun `tap command failure retains hierarchy skips subsequent steps and is not evaluated`() {
+        val device = interactiveDevice().apply { tapResult = DeviceCall(failure = DeviceFailureKind.COMMAND, detail = "private stderr") }
+        val result = coordinator(device, completeCapture()).run(interactiveRequest("tap-failed", repeatTap = true))
+        assertEquals(ExecutionStatus.ERROR, result.document?.status)
+        assertEquals(ScenarioVerdict.NOT_EVALUATED, result.document?.verdict)
+        assertEquals(listOf(StepStatus.ERROR, StepStatus.SKIPPED, StepStatus.SKIPPED), result.document?.steps?.map { it.status })
+        assertEquals(1, device.operations.count { it.startsWith("tap:") })
+        assertEquals(1, device.operations.count { it.startsWith("dump:") })
+        val bundle = requireNotNull(result.output)
+        assertTrue(Files.exists(bundle.resolve("ui/steps/001-tap-before.xml")))
+        assertFalse(Files.readString(bundle.resolve("execution/result.json")).contains("private stderr"))
+        assertTrue(result.bundleIntegrityValid)
+    }
+
+    @Test
+    fun `cancellation or overall deadline after hierarchy prevents tap and later steps`() {
+        for (cancel in listOf(true, false)) {
+            var cancelled = false
+            val clock = FakeMonotonicClock()
+            val device =
+                object : FakeSmokeDevice() {
+                    override fun dumpHierarchy(
+                        serial: String,
+                        remotePath: String,
+                        destination: Path,
+                        timeoutMillis: Long,
+                        outputLimitBytes: Long,
+                    ): DeviceCall<Unit> {
+                        val result = super.dumpHierarchy(serial, remotePath, destination, timeoutMillis, outputLimitBytes)
+                        if (cancel) cancelled = true else clock.advanceMillis(4_000_000)
+                        return result
+                    }
+                }.apply { dumps += DumpResponse(TAP_XML) }
+            val result =
+                SmokeCoordinator(
+                    device,
+                    completeCapture(),
+                    wallClock = wallClock,
+                    monotonicClock = clock,
+                    cancellation = CancellationSignal { cancelled },
+                    idSource = { "run-boundary" },
+                ).run(interactiveRequest("boundary-$cancel", repeatTap = true))
+            assertEquals(if (cancel) ExecutionStatus.CANCELLED else ExecutionStatus.ERROR, result.document?.status)
+            assertEquals(ScenarioVerdict.NOT_EVALUATED, result.document?.verdict)
+            assertTrue(device.operations.none { it.startsWith("tap:") })
+            assertEquals(StepStatus.SKIPPED, result.document?.steps?.last()?.status)
+            assertTrue(result.bundleIntegrityValid)
+        }
+    }
+
+    @Test
+    fun `tap collection and resolution failures never issue input and publish truthful partial evidence`() {
+        for ((index, response) in listOf(
+            DumpResponse(failure = DeviceFailureKind.DISCONNECTED),
+            DumpResponse("<hierarchy/>".toByteArray()),
+            DumpResponse("<hierarchy>".toByteArray()),
+            DumpResponse(TAP_XML.toString(Charsets.UTF_8).replace("[10,20][30,60]", "invalid").toByteArray()),
+        ).withIndex()) {
+            val device = FakeSmokeDevice().apply { dumps += response }
+            val result = coordinator(device, completeCapture()).run(interactiveRequest("resolution-$index"))
+            assertEquals(ExecutionStatus.ERROR, result.document?.status)
+            assertEquals(ScenarioVerdict.NOT_EVALUATED, result.document?.verdict)
+            assertEquals(EvidenceCompleteness.PARTIAL, result.document?.evidenceCompleteness)
+            assertTrue(device.operations.none { it.startsWith("tap:") })
+            assertTrue(result.bundleIntegrityValid)
+        }
+    }
+
+    @Test
+    fun `cancellation after a dispatched tap prevents the next tap`() {
+        var cancelled = false
+        val device =
+            object : FakeSmokeDevice() {
+                override fun tap(
+                    serial: String,
+                    coordinates: TapCoordinates,
+                    timeoutMillis: Long,
+                ): DeviceCall<Unit> {
+                    val result = super.tap(serial, coordinates, timeoutMillis)
+                    cancelled = true
+                    return result
+                }
+            }.apply { dumps += DumpResponse(TAP_XML) }
+        val result =
+            SmokeCoordinator(
+                device,
+                completeCapture(),
+                wallClock = wallClock,
+                cancellation = CancellationSignal { cancelled },
+                idSource = { "cancel-after-tap" },
+            ).run(interactiveRequest("after-tap", repeatTap = true))
+        assertEquals(ExecutionStatus.CANCELLED, result.document?.status)
+        assertEquals(ScenarioVerdict.NOT_EVALUATED, result.document?.verdict)
+        assertEquals(1, device.operations.count { it.startsWith("tap:") })
+        assertEquals(listOf(StepStatus.CANCELLED, StepStatus.SKIPPED, StepStatus.SKIPPED), result.document?.steps?.map { it.status })
+        assertTrue(result.bundleIntegrityValid)
+    }
+
+    @Test
+    fun `early assertion nonmatch stops later mutations and is never overwritten by a pass`() {
+        val request = interactiveRequest("early-failure")
+        val text = INTERACTIVE_SCENARIO
+        val assertion = text.substringAfter("},{").removeSuffix("]}")
+        Files.writeString(request.scenarioPath, text.replace("\"steps\":[", "\"steps\":[{" + assertion + ","))
+        val device = FakeSmokeDevice()
+        val result = coordinator(device, completeCapture()).run(request)
+        assertEquals(ScenarioVerdict.FAILED, result.document?.verdict)
+        assertEquals(listOf(StepStatus.ASSERTION_FAILED, StepStatus.SKIPPED, StepStatus.SKIPPED), result.document?.steps?.map { it.status })
+        assertTrue(device.operations.none { it.startsWith("tap:") })
+        assertTrue(result.bundleIntegrityValid)
+    }
+
+    @Test
+    fun `interactive timeline exposes ordered steps and documents remain deterministic`() {
+        fun execute(name: String): Path =
+            requireNotNull(
+                coordinator(interactiveDevice(), completeCapture()).run(interactiveRequest(name)).output,
+            )
+        val first = execute("interactive-one")
+        val second = execute("interactive-two")
+        val timeline = evidenceJson.decodeFromString<TimelineDocument>(Files.readString(first.resolve("timeline.json")))
+        assertEquals(
+            listOf(
+                "execution.preflight",
+                "execution.artifact_binding",
+                "execution.launch",
+                "scenario.step.tap",
+                "scenario.step.assert",
+                "execution.assertion",
+                "execution.capture",
+                "execution.finalization",
+            ),
+            timeline.events.map { it.type },
+        )
+        for (path in listOf("manifest.json", "timeline.json", "execution/result.json")) {
+            assertContentEquals(Files.readAllBytes(first.resolve(path)), Files.readAllBytes(second.resolve(path)))
+        }
+    }
+
+    private fun interactiveDevice() =
+        FakeSmokeDevice().apply {
+            dumps += DumpResponse(TAP_XML)
+            val completed =
+                FakeSmokeDevice.MATCHING_XML.toString(Charsets.UTF_8)
+                    .replace("DroidProof ready", "DroidProof action completed").toByteArray()
+            dumps += DumpResponse(completed)
+        }
+
+    private fun interactiveRequest(
+        name: String,
+        repeatTap: Boolean = false,
+    ): SmokeRunRequest {
+        val scenario = directory.resolve("$name.json")
+        val tap = """{"type":"tapUiNode","resourceId":"io.droidproof.smoke:id/action"},"""
+        Files.writeString(scenario, if (repeatTap) INTERACTIVE_SCENARIO.replace(tap, tap + tap) else INTERACTIVE_SCENARIO)
+        return request(name).copy(scenarioPath = scenario)
+    }
+
     private fun coordinator(
         device: FakeSmokeDevice,
         capture: DeviceEvidenceCapture,
@@ -287,3 +489,9 @@ class SmokeCoordinatorTest {
             )
         }
 }
+
+private val TAP_XML =
+    (
+        """<hierarchy><node package="io.droidproof.smoke" resource-id="io.droidproof.smoke:id/action" """ +
+            """bounds="[10,20][30,60]"/></hierarchy>"""
+    ).toByteArray()

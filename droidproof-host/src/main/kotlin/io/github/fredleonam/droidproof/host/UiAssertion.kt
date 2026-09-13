@@ -1,5 +1,6 @@
 package io.github.fredleonam.droidproof.host
 
+import io.github.fredleonam.droidproof.model.BundleRelativePath
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.UUID
@@ -22,6 +23,42 @@ class UiAssertionRunner(
 ) {
     fun await(
         scenario: SmokeScenario,
+        serial: String,
+        workDirectory: Path,
+        operationTimeoutMillis: (Long) -> Long,
+    ): UiAssertionAttempt =
+        await(
+            scenario.expectedPackage,
+            scenario.orderedSteps.single() as AssertUiNode,
+            serial,
+            workDirectory,
+            HIERARCHY_BUNDLE_PATH,
+            operationTimeoutMillis,
+        )
+
+    fun await(
+        expectedPackage: String,
+        step: AssertUiNode,
+        serial: String,
+        workDirectory: Path,
+        hierarchyPath: BundleRelativePath,
+        operationTimeoutMillis: (Long) -> Long,
+    ): UiAssertionAttempt =
+        await(
+            AssertionParameters(
+                expectedPackage,
+                UiExpectation(step.resourceId, step.text),
+                step.deadlineMillis,
+                step.pollIntervalMillis,
+                hierarchyPath,
+            ),
+            serial,
+            workDirectory,
+            operationTimeoutMillis,
+        )
+
+    private fun await(
+        scenario: AssertionParameters,
         serial: String,
         workDirectory: Path,
         operationTimeoutMillis: (Long) -> Long,
@@ -69,7 +106,7 @@ class UiAssertionRunner(
                         scenario.expectedPackage,
                         scenario.expectedUi.resourceId,
                         scenario.expectedUi.text,
-                        HIERARCHY_BUNDLE_PATH,
+                        scenario.hierarchyPath,
                         successfulObservations,
                         inspected.detail,
                     ),
@@ -94,7 +131,7 @@ class UiAssertionRunner(
     }
 
     private fun deadlineResult(
-        scenario: SmokeScenario,
+        scenario: AssertionParameters,
         observations: Int,
         hierarchy: Path?,
     ): UiAssertionAttempt =
@@ -105,7 +142,7 @@ class UiAssertionRunner(
                     scenario.expectedPackage,
                     scenario.expectedUi.resourceId,
                     scenario.expectedUi.text,
-                    HIERARCHY_BUNDLE_PATH,
+                    scenario.hierarchyPath,
                     observations,
                     "The deadline expired after valid hierarchy observations without a matching node.",
                 ),
@@ -116,13 +153,13 @@ class UiAssertionRunner(
         }
 
     private fun cancelled(
-        scenario: SmokeScenario,
+        scenario: AssertionParameters,
         observations: Int,
         hierarchy: Path?,
     ): UiAssertionAttempt = error(scenario, observations, hierarchy, "Execution was cancelled.", true)
 
     private fun error(
-        scenario: SmokeScenario,
+        scenario: AssertionParameters,
         observations: Int,
         hierarchy: Path?,
         detail: String,
@@ -149,3 +186,11 @@ class UiAssertionRunner(
         val HIERARCHY_BUNDLE_PATH = io.github.fredleonam.droidproof.model.BundleRelativePath("ui/hierarchy.xml")
     }
 }
+
+private data class AssertionParameters(
+    val expectedPackage: String,
+    val expectedUi: UiExpectation,
+    val assertionDeadlineMillis: Long,
+    val pollIntervalMillis: Long,
+    val hierarchyPath: BundleRelativePath,
+)

@@ -61,6 +61,12 @@ interface SmokeDeviceOperations {
         timeoutMillis: Long,
     ): DeviceCall<Unit>
 
+    fun tap(
+        serial: String,
+        coordinates: TapCoordinates,
+        timeoutMillis: Long,
+    ): DeviceCall<Unit>
+
     fun dumpHierarchy(
         serial: String,
         remotePath: String,
@@ -169,6 +175,23 @@ class SmokeAdbClient(
         val success = output.lineSequence().any { it.trim() == "Status: ok" || it.trim().startsWith("Starting: Intent") }
         if (!success || ACTIVITY_ERROR.containsMatchIn(output)) {
             return DeviceCall(failure = DeviceFailureKind.INVALID_OUTPUT, detail = "Activity manager reported a launch error.")
+        }
+        return DeviceCall(Unit)
+    }
+
+    override fun tap(
+        serial: String,
+        coordinates: TapCoordinates,
+        timeoutMillis: Long,
+    ): DeviceCall<Unit> {
+        val result =
+            run(
+                target(serial) + listOf("shell", "input", "tap", coordinates.x.toString(), coordinates.y.toString()),
+                timeoutMillis,
+            )
+        if (result.failure != null) return result.failureCall("UI tap command failed.")
+        if (result.stdout.isNotBlank() || result.stderr.isNotBlank()) {
+            return DeviceCall(failure = DeviceFailureKind.INVALID_OUTPUT, detail = "UI tap command returned unexpected output.")
         }
         return DeviceCall(Unit)
     }

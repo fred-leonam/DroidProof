@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 2,
+  "scenarioId": "smoke-action-failing",
+  "expectedPackage": "io.github.fredleonam.droidproof.smokeapp",
+  "launchComponent": "io.github.fredleonam.droidproof.smokeapp/io.github.fredleonam.droidproof.smokeapp.MainActivity",
+  "steps": [
+    {
+      "type": "tapUiNode",
+      "resourceId": "io.github.fredleonam.droidproof.smokeapp:id/action"
+    },
+    {
+      "type": "assertUiNode",
+      "resourceId": "io.github.fredleonam.droidproof.smokeapp:id/status",
+      "text": "DroidProof intentionally wrong",
+      "deadlineMillis": 15000,
+      "pollIntervalMillis": 250
+    }
+  ]
+}

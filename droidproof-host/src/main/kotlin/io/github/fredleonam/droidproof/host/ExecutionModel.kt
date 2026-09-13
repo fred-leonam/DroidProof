@@ -61,8 +61,38 @@ data class AssertionDocument(
 )
 
 @Serializable
+enum class StepType {
+    @kotlinx.serialization.SerialName("tapUiNode")
+    TAP_UI_NODE,
+
+    @kotlinx.serialization.SerialName("assertUiNode")
+    ASSERT_UI_NODE,
+}
+
+@Serializable
+enum class StepStatus {
+    SUCCEEDED,
+    ASSERTION_FAILED,
+    ERROR,
+    CANCELLED,
+    SKIPPED,
+}
+
+@Serializable
+data class StepOutcome(
+    val index: Int,
+    val type: StepType,
+    val status: StepStatus,
+    val hostStartedAt: String,
+    val hostEndedAt: String,
+    val detail: String? = null,
+    val hierarchyPath: BundleRelativePath? = null,
+    val assertion: AssertionDocument? = null,
+)
+
+@Serializable
 data class ExecutionResultDocument(
-    val resultSchemaVersion: Int = 1,
+    val resultSchemaVersion: Int = 2,
     val executionId: String,
     val hostStartedAt: String,
     val hostEndedAt: String,
@@ -72,6 +102,7 @@ data class ExecutionResultDocument(
     val stages: List<StageOutcome>,
     val observations: List<HostObservation>,
     val assertion: AssertionDocument,
+    val steps: List<StepOutcome> = emptyList(),
     val primaryError: String? = null,
     val finalizationError: String? = null,
 )

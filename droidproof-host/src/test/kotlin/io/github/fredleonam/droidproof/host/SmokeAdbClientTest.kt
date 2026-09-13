@@ -8,6 +8,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -87,5 +88,29 @@ class SmokeAdbClientTest {
         assertFalse(Files.exists(destination))
         assertEquals(32, requests.single { "cat" in it.arguments }.stdoutLimitBytes)
         assertTrue(requests.single { "rm" in it.arguments }.arguments.last().startsWith("/sdcard/Download/droidproof-"))
+    }
+
+    @Test
+    fun `tap uses serial scoped argument list bounded timeout and rejects unsafe inputs`() {
+        val requests = mutableListOf<CommandRequest>()
+        val client =
+            SmokeAdbClient(
+                Path.of("/fake/adb with spaces"),
+                CommandRunner {
+                    requests += it
+                    CommandResult()
+                },
+            )
+        assertTrue(client.tap("emulator-5554", TapCoordinates(20, 40), 123).isSuccessful)
+        assertEquals(
+            listOf("/fake/adb with spaces", "-s", "emulator-5554", "shell", "input", "tap", "20", "40"),
+            requests.single().arguments,
+        )
+        assertEquals(123L, requests.single().timeoutMillis)
+        assertFailsWith<IllegalArgumentException> { client.tap("serial;command", TapCoordinates(0, 0), 123) }
+        assertFailsWith<IllegalArgumentException> { TapCoordinates(-1, 0) }
+        assertEquals(1, requests.size)
+        val failed = SmokeAdbClient(Path.of("/fake/adb"), CommandRunner { CommandResult(stderr = "Error: private device text") })
+        assertEquals(DeviceFailureKind.INVALID_OUTPUT, failed.tap("emulator-5554", TapCoordinates(1, 2), 123).failure)
     }
 }

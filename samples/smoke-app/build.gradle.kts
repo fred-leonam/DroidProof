@@ -14,6 +14,15 @@ android {
     namespace = "io.github.fredleonam.droidproof.smokeapp"
     compileSdk = 35
 
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = "17"
+        allWarningsAsErrors = true
+    }
+
     defaultConfig {
         applicationId = "io.github.fredleonam.droidproof.smokeapp"
         minSdk = 23
