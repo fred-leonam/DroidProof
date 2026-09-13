@@ -5,16 +5,17 @@
 DroidProof is a planned open-source Android verification harness that will turn test executions into artifact-bound, human-readable, and machine-readable evidence. It will correlate application identity, device configuration, UI state, screenshots, semantics, logs, and network activity to show how a specific Android build behaved under a defined scenario.
 
 > [!IMPORTANT]
-> DroidProof is currently in early development. The JVM evidence core, read-only ADB device capture adapter, and one narrow artifact-bound Android smoke scenario are implemented. These APIs are not yet a stable release.
+> DroidProof is currently in early development. The JVM evidence core, read-only ADB device capture adapter, one narrow artifact-bound Android smoke scenario, and offline static HTML reporting are implemented. These APIs are not yet a stable release.
 
 ## Current implementation
 
 The current executable slices provide platform-independent Kotlin/JVM modules:
 
-- `droidproof-model` defines validated identities, portable bundle paths, schema-v2 evidence descriptors, an environment contract, and timeline events.
+- `droidproof-model` defines validated identities, portable bundle paths, evidence descriptors, schema-v2 environment contracts, schema-v3 execution manifests, and timeline events.
 - `droidproof-evidence` copies evidence through bounded buffers, calculates SHA-256 and byte size while streaming, writes bundles transactionally, and verifies existing bundles with structured issue codes.
 - `droidproof-device` collects observed device metadata, a display screenshot, and optional PID-filtered logcat through installed ADB Platform Tools. It depends on the model; the evidence core does not depend on device code.
 - `droidproof-host` executes one strict JSON smoke scenario against an explicitly selected test emulator, binds the installed APK bytes before and after observation, launches one activity, runs the narrow ordered schema-v2 actions `typeTextUiNode`, `tapUiNode`, and `assertUiNode`, and writes a verified schema-v3 bundle.
+- `droidproof-report` verifies an existing bundle and generates one deterministic, offline static HTML report with inline CSS. It depends only on the model and evidence modules, not Android, ADB, or host execution internals.
 
 Schema version 2 binds every copied evidence file to the manifest. Inventory paths are deterministic and lexicographically ordered. Schema version 1 remains readable, but its verification result warns that file integrity is unavailable instead of claiming success for checks that format cannot support. See [ADR 0002](docs/adr/0002-evidence-file-integrity.md) for the compatibility and path-safety policy.
 
@@ -148,6 +149,33 @@ Schema version 3 records requested configuration separately from observed enviro
 
 The verdict proves only that one package/resource-ID/exact-text node was exposed by the accessibility hierarchy for the identified APK at the recorded observation points. Screenshot and hierarchy are sequential observations. APK hash equality is not continuous attestation, hashes do not authenticate the producer, and no certificate fingerprint is claimed.
 
+### 4. Offline HTML evidence report
+
+Generate a report from any existing DroidProof evidence bundle:
+
+```bash
+./gradlew :droidproof-report:generateEvidenceReport \
+  -Pdroidproof.bundlePath=/absolute/path/to/bundle
+```
+
+The default output is `droidproof-report/build/reports/droidproof/evidence-report.html`. Select another location outside the source bundle with:
+
+```bash
+./gradlew :droidproof-report:generateEvidenceReport \
+  -Pdroidproof.bundlePath=/absolute/path/to/bundle \
+  -Pdroidproof.reportPath=/absolute/path/to/report.html
+```
+
+The task requires `droidproof.bundlePath`, does not need an Android SDK, ADB, a device, or network access, and is not part of `check`. It never treats external evidence as a cacheable report input and always runs when requested. The source bundle is verified before content is rendered, is never modified, and cannot contain the selected report output.
+
+For schema-v3 execution bundles, the report shows the stored execution status, scenario verdict and evidence completeness; artifact identity and binding observations; requested configuration separately from observed or explicitly unavailable environment values; the canonical timeline; the verified evidence inventory; and local evidence links. A verified PNG screenshot is shown as a bounded preview while continuing to reference the existing bundle file. Arbitrary XML, JSON and other evidence content is linked rather than injected into the page. The report does not derive a different success result from the stored execution model.
+
+Schema-v2 synthetic bundles are rendered with their recorded environment contract, timeline and integrity-checked inventory. Schema-v1 remains supported as an explicitly legacy/limited report: its manifest and timeline can be shown, but the report repeats `FILE_INTEGRITY_UNAVAILABLE` and provides no evidence previews or links because that schema has no file inventory.
+
+The generated document is one UTF-8 HTML file with inline CSS and no JavaScript, remote fonts, CDN resources, or network calls. Bundle-derived text and link attributes are centrally HTML-escaped, and links are constructed only from verified, validated evidence paths. Displayed evidence paths remain bundle-relative; moving the report without preserving its filesystem relationship to the bundle can break its local links.
+
+If verification fails, the task writes a limited diagnostic HTML page containing the safely escaped schema version and structured verification issues, omits artifact/scenario claims, timeline links and screenshot previews, then exits unsuccessfully. The HTML is a disposable derived view, not evidence: it is never added to `manifest.evidenceFiles` and is not integrity-bound. SHA-256 verification establishes consistency with the supplied manifest, not authenticity or producer identity. See [ADR 0007](docs/adr/0007-static-html-evidence-reports.md).
+
 ## Motivation
 
 A conventional test result usually says that a test passed or failed. It often does not preserve enough context to answer:
@@ -182,7 +210,7 @@ flowchart TB
 - **Mock server:** provides deterministic backend responses and controlled failure conditions.
 - **Optional application probe:** exposes selected test hooks in non-production builds.
 - **Evidence collectors:** capture screenshots, semantics, logcat, network exchanges, and environment metadata.
-- **Report generator:** produces evidence for developers, CI systems, and automated agents.
+- **Report generator:** currently produces a static offline human-readable view of existing evidence bundles.
 
 ## Core model
 
@@ -214,7 +242,7 @@ The schema-v2 manifest binds the result to information such as:
 - DroidProof version.
 - copied evidence paths, media types, byte sizes, and SHA-256 digests.
 
-The repository can also execute the narrow native smoke scenario described above. Its scenario format supports only `typeTextUiNode`, `tapUiNode`, and `assertUiNode`; it does not provide a general-purpose scenario DSL, Compose semantics, or intercepted network traffic. The sample's network document remains synthetic scenario evidence used to exercise the JVM bundle API. Emulator lifecycle control, a mock server, HTML reporting, and a CLI remain unimplemented.
+The repository can also execute the narrow native smoke scenario described above. Its scenario format supports only `typeTextUiNode`, `tapUiNode`, and `assertUiNode`; it does not provide a general-purpose scenario DSL, Compose semantics, or intercepted network traffic. The sample's network document remains synthetic scenario evidence used to exercise the JVM bundle API. The current HTML report is local and static: it has no hosting, JavaScript UI, authentication, signing, or embedded evidence. Emulator lifecycle control, a mock server, and a general CLI remain unimplemented.
 
 ## Key differentiators
 
