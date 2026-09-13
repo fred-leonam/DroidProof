@@ -61,12 +61,15 @@ data class AssertionDocument(
 )
 
 @Serializable
-enum class StepType {
+enum class StepType(val timelineEventType: String, val hierarchySuffix: String, val deviceOperationCount: Int) {
     @kotlinx.serialization.SerialName("tapUiNode")
-    TAP_UI_NODE,
+    TAP_UI_NODE("scenario.step.tap", "tap-before", 2),
+
+    @kotlinx.serialization.SerialName("typeTextUiNode")
+    TYPE_TEXT_UI_NODE("scenario.step.type_text", "input-before", 3),
 
     @kotlinx.serialization.SerialName("assertUiNode")
-    ASSERT_UI_NODE,
+    ASSERT_UI_NODE("scenario.step.assert", "assert", 2),
 }
 
 @Serializable

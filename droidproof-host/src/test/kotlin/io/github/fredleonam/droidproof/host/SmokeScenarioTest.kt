@@ -65,6 +65,27 @@ class SmokeScenarioTest {
         assertRejected(" ".repeat(1024 * 1024 + 1))
     }
 
+    @Test
+    fun `text step validates restricted language and preserves exact bytes and hash`() {
+        val source = directory.resolve("text.json")
+        Files.writeString(source, TEXT_SCENARIO)
+        val accepted = SmokeScenarioLoader.load(source)
+        assertEquals(TEXT_SCENARIO, accepted.exactBytes.toString(Charsets.UTF_8))
+        assertEquals(io.github.fredleonam.droidproof.evidence.Sha256Calculator.calculate(source), accepted.sha256)
+        assertEquals(TypeTextUiNode("io.droidproof.smoke:id/name", "DroidProof42"), accepted.scenario.orderedSteps.first())
+        for (value in listOf("A".repeat(128), "AZaz09._-@")) {
+            Files.writeString(source, TEXT_SCENARIO.replace("DroidProof42", value))
+            SmokeScenarioLoader.load(source)
+        }
+        for (value in listOf("", "a".repeat(129), "a b", "%s", "é", "a;b", "a'b", "\n", "\t", "\u0000", "\r")) {
+            assertRejected(TEXT_SCENARIO.replace("\"DroidProof42\"", kotlinx.serialization.json.JsonPrimitive(value).toString()))
+        }
+        assertRejected(TEXT_SCENARIO.replace("typeTextUiNode", "unknownInput"))
+        assertRejected(TEXT_SCENARIO.replace("\"type\":\"typeTextUiNode\"", "\"type\":\"typeTextUiNode\",\"clear\":true"))
+        assertRejected(TEXT_SCENARIO.replace("io.droidproof.smoke:id/name", "other.package:id/name"))
+        assertRejected(TEXT_SCENARIO.replace("io.droidproof.smoke:id/name", "name"))
+    }
+
     private fun assertRejected(content: String) {
         val source = directory.resolve("invalid-${content.hashCode()}.json")
         Files.writeString(source, content)
@@ -85,3 +106,9 @@ internal const val INTERACTIVE_SCENARIO =
         """"launchComponent":"io.droidproof.smoke/io.droidproof.smoke.MainActivity","steps":[{"type":"tapUiNode",""" +
         """"resourceId":"io.droidproof.smoke:id/action"},{"type":"assertUiNode","resourceId":"io.droidproof.smoke:id/status",""" +
         """"text":"DroidProof action completed","deadlineMillis":250,"pollIntervalMillis":100}]}"""
+
+internal val TEXT_SCENARIO =
+    INTERACTIVE_SCENARIO.replace(
+        "\"steps\":[",
+        "\"steps\":[{\"type\":\"typeTextUiNode\",\"resourceId\":\"io.droidproof.smoke:id/name\",\"text\":\"DroidProof42\"},",
+    ).replace("DroidProof action completed", "Hello DroidProof42")

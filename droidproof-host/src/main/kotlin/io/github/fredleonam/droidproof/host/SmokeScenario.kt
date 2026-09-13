@@ -37,9 +37,36 @@ sealed class ScenarioStep {
     abstract val resourceId: String
 }
 
+internal val ScenarioStep.stepType: StepType
+    get() =
+        when (this) {
+            is TypeTextUiNode -> StepType.TYPE_TEXT_UI_NODE
+            is TapUiNode -> StepType.TAP_UI_NODE
+            is AssertUiNode -> StepType.ASSERT_UI_NODE
+        }
+
 @Serializable
 @SerialName("tapUiNode")
 data class TapUiNode(override val resourceId: String) : ScenarioStep()
+
+@Serializable
+@SerialName("typeTextUiNode")
+data class TypeTextUiNode(
+    override val resourceId: String,
+    val text: String,
+) : ScenarioStep() {
+    init {
+        validateInputText(text)
+    }
+}
+
+internal fun validateInputText(text: String) {
+    require(text.length in 1..128 && SAFE_INPUT_TEXT.matches(text)) {
+        "Input text must contain 1 to 128 ASCII letters, digits, or . _ - @ characters; use non-secret test data only."
+    }
+}
+
+private val SAFE_INPUT_TEXT = Regex("[A-Za-z0-9._@-]+")
 
 @Serializable
 @SerialName("assertUiNode")

@@ -113,4 +113,57 @@ class SmokeAdbClientTest {
         val failed = SmokeAdbClient(Path.of("/fake/adb"), CommandRunner { CommandResult(stderr = "Error: private device text") })
         assertEquals(DeviceFailureKind.INVALID_OUTPUT, failed.tap("emulator-5554", TapCoordinates(1, 2), 123).failure)
     }
+
+    @Test
+    fun `text input is bounded validated serial scoped and argument based`() {
+        val requests = mutableListOf<CommandRequest>()
+        val client =
+            SmokeAdbClient(
+                Path.of("/fake/adb with spaces"),
+                CommandRunner {
+                    requests += it
+                    CommandResult()
+                },
+            )
+        assertTrue(client.inputText("emulator-5554", "AZaz09._-@", 123).isSuccessful)
+        assertEquals(
+            listOf("/fake/adb with spaces", "-s", "emulator-5554", "shell", "input", "text", "AZaz09._-@"),
+            requests.single().arguments,
+        )
+        assertEquals(123L, requests.single().timeoutMillis)
+        for (text in listOf("", "a".repeat(129), "a b", "%s", "a;id", "$(id)", "é", "\n", "\u0000")) {
+            assertFailsWith<IllegalArgumentException> { client.inputText("emulator-5554", text, 123) }
+        }
+        assertFailsWith<IllegalArgumentException> { client.inputText("serial;id", "safe", 123) }
+        for (timeout in listOf(0L, -1L, 3_600_001L)) {
+            assertFailsWith<IllegalArgumentException> { client.inputText("emulator-5554", "safe", timeout) }
+        }
+        assertEquals(1, requests.size)
+    }
+
+    @Test
+    fun `text input preserves device failure semantics without private output`() {
+        val cases =
+            listOf(
+                CommandResult(stderr = "private stderr") to DeviceFailureKind.INVALID_OUTPUT,
+                CommandResult(stdout = "private stderr") to DeviceFailureKind.INVALID_OUTPUT,
+                CommandResult(
+                    failure = io.github.fredleonam.droidproof.device.CommandFailure.NONZERO_EXIT,
+                    stderr = "private stderr",
+                ) to DeviceFailureKind.COMMAND,
+                CommandResult(
+                    failure = io.github.fredleonam.droidproof.device.CommandFailure.INTERRUPTED,
+                    stderr = "private stderr",
+                ) to DeviceFailureKind.CANCELLED,
+                CommandResult(
+                    failure = io.github.fredleonam.droidproof.device.CommandFailure.NONZERO_EXIT,
+                    stderr = "offline private stderr",
+                ) to DeviceFailureKind.DISCONNECTED,
+            )
+        for ((response, expected) in cases) {
+            val result = SmokeAdbClient(Path.of("/fake/adb"), CommandRunner { response }).inputText("emulator-5554", "safe", 123)
+            assertEquals(expected, result.failure)
+            assertFalse(result.detail.orEmpty().contains("private stderr"))
+        }
+    }
 }

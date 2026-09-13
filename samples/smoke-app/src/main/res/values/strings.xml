@@ -4,4 +4,6 @@
     <string name="ready">DroidProof ready</string>
     <string name="action">Complete action</string>
     <string name="action_completed">DroidProof action completed</string>
+    <string name="name">Test name</string>
+    <string name="greeting">Hello %1$s</string>
 </resources>

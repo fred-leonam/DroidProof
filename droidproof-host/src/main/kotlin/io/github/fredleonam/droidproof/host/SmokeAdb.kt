@@ -67,6 +67,12 @@ interface SmokeDeviceOperations {
         timeoutMillis: Long,
     ): DeviceCall<Unit>
 
+    fun inputText(
+        serial: String,
+        text: String,
+        timeoutMillis: Long,
+    ): DeviceCall<Unit>
+
     fun dumpHierarchy(
         serial: String,
         remotePath: String,
@@ -192,6 +198,21 @@ class SmokeAdbClient(
         if (result.failure != null) return result.failureCall("UI tap command failed.")
         if (result.stdout.isNotBlank() || result.stderr.isNotBlank()) {
             return DeviceCall(failure = DeviceFailureKind.INVALID_OUTPUT, detail = "UI tap command returned unexpected output.")
+        }
+        return DeviceCall(Unit)
+    }
+
+    override fun inputText(
+        serial: String,
+        text: String,
+        timeoutMillis: Long,
+    ): DeviceCall<Unit> {
+        validateInputText(text)
+        require(timeoutMillis in 1..3_600_000) { "Command timeout is outside supported bounds." }
+        val result = run(target(serial) + listOf("shell", "input", "text", text), timeoutMillis)
+        if (result.failure != null) return result.failureCall("UI text input command failed.")
+        if (result.stdout.isNotBlank() || result.stderr.isNotBlank()) {
+            return DeviceCall(failure = DeviceFailureKind.INVALID_OUTPUT, detail = "UI text input command returned unexpected output.")
         }
         return DeviceCall(Unit)
     }

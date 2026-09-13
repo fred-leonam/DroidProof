@@ -402,6 +402,170 @@ class SmokeCoordinatorTest {
         idSource = { "run-001" },
     )
 
+    @Test
+    fun `text flow preserves exact operation order and integrity bound evidence`() {
+        val device = textDevice()
+        val request = textRequest("text-pass")
+        val result =
+            coordinator(
+                device,
+                DeviceEvidenceCapture {
+                    device.operations += "capture"
+                    completeCapture().capture(it)
+                },
+            ).run(request)
+        assertTrue(result.isSuccessful)
+        assertEquals(
+            listOf(
+                "preflight", "paths", "install", "paths", "pull", "launch", "dump", "tap", "input",
+                "dump", "tap", "dump", "capture", "paths", "pull",
+            ),
+            device.operations.map { it.substringBefore(':') },
+        )
+        assertEquals(
+            listOf("tap:emulator-5554:60:80", "input:emulator-5554:DroidProof42", "tap:emulator-5554:20:40"),
+            device.operations.filter { it.startsWith("tap:") || it.startsWith("input:") },
+        )
+        assertEquals(
+            listOf(StepType.TYPE_TEXT_UI_NODE, StepType.TAP_UI_NODE, StepType.ASSERT_UI_NODE),
+            result.document?.steps?.map { it.type },
+        )
+        assertTrue(result.document!!.steps.all { it.status == StepStatus.SUCCEEDED })
+        val bundle = requireNotNull(result.output)
+        val manifest = evidenceJson.decodeFromString<EvidenceBundleManifestV3>(Files.readString(bundle.resolve("manifest.json")))
+        for (path in listOf("ui/steps/001-input-before.xml", "ui/steps/002-tap-before.xml", "ui/steps/003-assert.xml")) {
+            val descriptor = manifest.evidenceFiles.single { it.path.value == path }
+            assertEquals(Sha256Calculator.calculate(bundle.resolve(path)), descriptor.sha256)
+            assertEquals(Files.size(bundle.resolve(path)), descriptor.byteSize)
+        }
+        assertEquals("ui/steps/001-input-before.xml", result.document!!.steps.first().hierarchyPath?.value)
+        val timeline = evidenceJson.decodeFromString<TimelineDocument>(Files.readString(bundle.resolve("timeline.json")))
+        val events = timeline.events.filter { it.type.startsWith("scenario.step.") }
+        assertEquals(listOf("scenario.step.type_text", "scenario.step.tap", "scenario.step.assert"), events.map { it.type })
+        assertEquals("ui/steps/001-input-before.xml", events.first().evidence.single().path.value)
+        assertTrue(events.all { "DroidProof42" !in it.attributes.values })
+        assertContentEquals(Files.readAllBytes(request.scenarioPath), Files.readAllBytes(bundle.resolve("scenario/scenario.json")))
+        assertEquals(Sha256Calculator.calculate(request.scenarioPath), manifest.scenario.dataSha256)
+        assertTrue(EvidenceBundleVerifier().verify(bundle).isValid)
+        assertNoPrivateOutput(bundle)
+    }
+
+    @Test
+    fun `text final assertion nonmatch is completed failed`() {
+        val device = textDevice().apply { dumps.removeLast() }
+        val result = coordinator(device, completeCapture()).run(textRequest("text-nonmatch"))
+        assertEquals(ExecutionStatus.COMPLETED, result.document?.status)
+        assertEquals(ScenarioVerdict.FAILED, result.document?.verdict)
+        assertEquals(StepStatus.ASSERTION_FAILED, result.document?.steps?.last()?.status)
+        assertTrue(result.bundleIntegrityValid)
+    }
+
+    @Test
+    fun `text resolution failures prevent both mutations`() {
+        val node = INPUT_XML.toString(Charsets.UTF_8)
+        val responses =
+            listOf(
+                DumpResponse(failure = DeviceFailureKind.COMMAND, detail = "private stderr"),
+                DumpResponse("<hierarchy/>".toByteArray()),
+                DumpResponse(node.replace("</hierarchy>", node.substringAfter("<hierarchy>")).toByteArray()),
+                DumpResponse(node.replace("[50,60][70,100]", "bad").toByteArray()),
+                DumpResponse(node.replace("package=\"io.droidproof.smoke\"", "package=\"other.package\"").toByteArray()),
+                DumpResponse("<hierarchy>".toByteArray()),
+                DumpResponse("<!DOCTYPE x [<!ENTITY e SYSTEM \"file:///etc/passwd\">]><hierarchy>&e;</hierarchy>".toByteArray()),
+                DumpResponse(ByteArray(2 * 1024 * 1024 + 1) { 32 }),
+            )
+        for ((index, response) in responses.withIndex()) {
+            val device = FakeSmokeDevice().apply { dumps += response }
+            val result = coordinator(device, completeCapture()).run(textRequest("text-resolution-$index"))
+            assertEquals(ExecutionStatus.ERROR, result.document?.status)
+            assertEquals(ScenarioVerdict.NOT_EVALUATED, result.document?.verdict)
+            assertTrue(device.operations.none { it.startsWith("tap:") || it.startsWith("input:") })
+            assertEquals(listOf(StepStatus.ERROR, StepStatus.SKIPPED, StepStatus.SKIPPED), result.document?.steps?.map { it.status })
+            assertTrue(result.bundleIntegrityValid)
+            assertNoPrivateOutput(requireNotNull(result.output))
+        }
+    }
+
+    @Test
+    fun `focus and text command failures stop subsequent mutations`() {
+        for (focusFailure in listOf(true, false)) {
+            val device =
+                textDevice().apply {
+                    val failure = DeviceCall<Unit>(failure = DeviceFailureKind.COMMAND, detail = "private stderr")
+                    if (focusFailure) tapResult = failure else inputTextResult = failure
+                }
+            val result = coordinator(device, completeCapture()).run(textRequest("text-command-$focusFailure"))
+            assertEquals(ExecutionStatus.ERROR, result.document?.status)
+            assertEquals(ScenarioVerdict.NOT_EVALUATED, result.document?.verdict)
+            assertEquals(1, device.operations.count { it.startsWith("tap:") })
+            assertEquals(if (focusFailure) 0 else 1, device.operations.count { it.startsWith("input:") })
+            assertEquals(1, device.operations.count { it.startsWith("dump:") })
+            assertEquals(listOf(StepStatus.ERROR, StepStatus.SKIPPED, StepStatus.SKIPPED), result.document?.steps?.map { it.status })
+            assertTrue(result.bundleIntegrityValid)
+            val bundle = requireNotNull(result.output)
+            assertTrue(Files.exists(bundle.resolve("ui/steps/001-input-before.xml")))
+            assertNoPrivateOutput(bundle)
+        }
+    }
+
+    @Test
+    fun `cancellation and deadline at each text boundary prevent later mutations`() {
+        for (boundary in listOf("dump", "tap", "input")) {
+            for (cancel in listOf(true, false)) {
+                var cancelled = false
+                val clock = FakeMonotonicClock()
+                val device =
+                    textDevice().apply {
+                        afterOperation = {
+                            if (it == boundary) {
+                                if (cancel) cancelled = true else clock.advanceMillis(4_000_000)
+                            }
+                        }
+                    }
+                val result =
+                    SmokeCoordinator(
+                        device,
+                        completeCapture(),
+                        wallClock = wallClock,
+                        monotonicClock = clock,
+                        cancellation = CancellationSignal { cancelled },
+                        idSource = { "text-boundary" },
+                    ).run(textRequest("text-$boundary-$cancel"))
+                assertEquals(if (cancel) ExecutionStatus.CANCELLED else ExecutionStatus.ERROR, result.document?.status)
+                assertEquals(ScenarioVerdict.NOT_EVALUATED, result.document?.verdict)
+                assertEquals(if (boundary == "dump") 0 else 1, device.operations.count { it.startsWith("tap:") })
+                assertEquals(if (boundary == "input") 1 else 0, device.operations.count { it.startsWith("input:") })
+                assertEquals(1, device.operations.count { it.startsWith("dump:") })
+                assertEquals(
+                    listOf(if (cancel) StepStatus.CANCELLED else StepStatus.ERROR, StepStatus.SKIPPED, StepStatus.SKIPPED),
+                    result.document?.steps?.map { it.status },
+                )
+                assertTrue(result.bundleIntegrityValid)
+            }
+        }
+    }
+
+    private fun textRequest(name: String): SmokeRunRequest =
+        request(name).copy(scenarioPath = directory.resolve("$name.json").also { Files.writeString(it, TEXT_SCENARIO) })
+
+    private fun textDevice() =
+        FakeSmokeDevice().apply {
+            dumps += DumpResponse(INPUT_XML)
+            dumps += DumpResponse(TAP_XML)
+            val greeting = FakeSmokeDevice.MATCHING_XML.toString(Charsets.UTF_8).replace("DroidProof ready", "Hello DroidProof42")
+            dumps += DumpResponse(greeting.toByteArray())
+        }
+
+    private fun assertNoPrivateOutput(bundle: Path) {
+        Files.walk(bundle).use { paths ->
+            paths.filter { Files.isRegularFile(it) && it.toString().endsWith(".json") }.forEach {
+                val text = Files.readString(it)
+                assertFalse(text.contains(directory.toString()))
+                assertFalse(text.contains("private stderr"))
+            }
+        }
+    }
+
     private fun assertionRunner(
         device: FakeSmokeDevice,
         clock: FakeMonotonicClock,
@@ -495,3 +659,8 @@ private val TAP_XML =
         """<hierarchy><node package="io.droidproof.smoke" resource-id="io.droidproof.smoke:id/action" """ +
             """bounds="[10,20][30,60]"/></hierarchy>"""
     ).toByteArray()
+
+private val INPUT_XML =
+    TAP_XML.toString(
+        Charsets.UTF_8,
+    ).replace(":id/action", ":id/name").replace("[10,20][30,60]", "[50,60][70,100]").toByteArray()
