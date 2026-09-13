@@ -24,6 +24,11 @@ dependencies {
 
 tasks.test {
     useJUnitPlatform()
+    inputs.files(
+        rootProject.layout.projectDirectory.file("samples/smoke-app/scenarios/interactive-passing.json"),
+        rootProject.layout.projectDirectory.file("samples/smoke-app/scenarios/interactive-failing.json"),
+    )
+    systemProperty("droidproof.repositoryRoot", rootProject.layout.projectDirectory.asFile.absolutePath)
 }
 
 tasks.register<JavaExec>("runSmokeScenario") {
