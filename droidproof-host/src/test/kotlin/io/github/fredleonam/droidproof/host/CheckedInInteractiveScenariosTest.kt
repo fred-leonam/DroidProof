@@ -51,6 +51,26 @@ class CheckedInInteractiveScenariosTest {
         assertEquals(Sha256Calculator.calculate(failingPath), failingAccepted.sha256)
     }
 
+    @Test
+    fun `checked-in network scenario is a strict schema v3 ordered retry demonstration`() {
+        val path = scenarioPath("network-passing.json")
+        val accepted = SmokeScenarioLoader.load(path)
+        val scenario = accepted.scenario as SmokeScenarioV3
+
+        assertEquals(3, scenario.schemaVersion)
+        assertEquals(EXPECTED_PACKAGE, scenario.expectedPackage)
+        assertEquals("POST", scenario.backendPlan.method)
+        assertEquals("/orders", scenario.backendPlan.path)
+        assertEquals(listOf(503, 201), scenario.backendPlan.responsePlan.map { it.status })
+        assertEquals(
+            listOf(StepType.TYPE_TEXT_UI_NODE, StepType.TAP_UI_NODE, StepType.ASSERT_UI_NODE),
+            scenario.steps.map { it.stepType },
+        )
+        assertEquals(TapUiNode("$EXPECTED_PACKAGE:id/order_action"), scenario.steps[1])
+        assertContentEquals(Files.readAllBytes(path), accepted.exactBytes)
+        assertEquals(Sha256Calculator.calculate(path), accepted.sha256)
+    }
+
     private fun scenarioPath(name: String): Path =
         Path.of(requireNotNull(System.getProperty("droidproof.repositoryRoot")))
             .resolve("samples/smoke-app/scenarios")

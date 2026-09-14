@@ -25,15 +25,16 @@ import java.nio.file.Files
 import java.nio.file.Path
 
 fun main(args: Array<String>) {
-    require(args.size == 1) { "Expected output directory argument." }
-    val destination = Path.of(args.single()).toAbsolutePath()
+    require(args.size == 2) { "Expected output directory and DroidProof version arguments." }
+    val destination = Path.of(args[0]).toAbsolutePath()
+    val droidProofVersion = DroidProofVersion(args[1])
     Files.createDirectories(requireNotNull(destination.parent))
     val networkEvidence = Files.createTempFile(destination.parent, ".droidproof-scenario-data-", ".json")
     try {
         Files.writeString(networkEvidence, "{\"method\":\"POST\",\"path\":\"/orders\",\"status\":201}\n")
         EvidenceBundleWriter().write(
             EvidenceBundleRequest(
-                manifest = sampleManifest(),
+                manifest = sampleManifest(droidProofVersion),
                 events = sampleTimeline(),
                 evidenceFiles =
                     listOf(
@@ -55,7 +56,7 @@ fun main(args: Array<String>) {
     }
 }
 
-private fun sampleManifest() =
+internal fun sampleManifest(droidProofVersion: DroidProofVersion) =
     EvidenceBundleManifest(
         schemaVersion = 2,
         bundleId = BundleId("proof-checkout-offline-retry"),
@@ -81,7 +82,7 @@ private fun sampleManifest() =
                 randomSeed = 20260904,
                 controlledClock = ControlledClock(UtcTimestamp("2026-09-04T12:00:00Z"), true),
             ),
-        droidProofVersion = DroidProofVersion("0.2.0"),
+        droidProofVersion = droidProofVersion,
     )
 
 private fun sampleTimeline() =

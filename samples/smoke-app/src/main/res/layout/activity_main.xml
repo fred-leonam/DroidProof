@@ -27,4 +27,9 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:text="@string/action" />
+    <Button
+        android:id="@+id/order_action"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/order_action" />
 </LinearLayout>

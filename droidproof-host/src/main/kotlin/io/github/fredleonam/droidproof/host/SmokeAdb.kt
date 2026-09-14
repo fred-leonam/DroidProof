@@ -61,6 +61,19 @@ interface SmokeDeviceOperations {
         timeoutMillis: Long,
     ): DeviceCall<Unit>
 
+    fun reverseTcp(
+        serial: String,
+        devicePort: Int,
+        hostPort: Int,
+        timeoutMillis: Long,
+    ): DeviceCall<Unit>
+
+    fun removeReverseTcp(
+        serial: String,
+        devicePort: Int,
+        timeoutMillis: Long,
+    ): DeviceCall<Unit>
+
     fun tap(
         serial: String,
         coordinates: TapCoordinates,
@@ -185,6 +198,36 @@ class SmokeAdbClient(
         return DeviceCall(Unit)
     }
 
+    override fun reverseTcp(
+        serial: String,
+        devicePort: Int,
+        hostPort: Int,
+        timeoutMillis: Long,
+    ): DeviceCall<Unit> {
+        validatePort(devicePort)
+        validatePort(hostPort)
+        val result = run(target(serial) + listOf("reverse", "tcp:$devicePort", "tcp:$hostPort"), timeoutMillis)
+        if (result.failure != null) return result.failureCall("ADB reverse setup failed.")
+        if (result.stdout.isNotBlank() || result.stderr.isNotBlank()) {
+            return DeviceCall(failure = DeviceFailureKind.INVALID_OUTPUT, detail = "ADB reverse setup returned unexpected output.")
+        }
+        return DeviceCall(Unit)
+    }
+
+    override fun removeReverseTcp(
+        serial: String,
+        devicePort: Int,
+        timeoutMillis: Long,
+    ): DeviceCall<Unit> {
+        validatePort(devicePort)
+        val result = run(target(serial) + listOf("reverse", "--remove", "tcp:$devicePort"), timeoutMillis)
+        if (result.failure != null) return result.failureCall("ADB reverse cleanup failed.")
+        if (result.stdout.isNotBlank() || result.stderr.isNotBlank()) {
+            return DeviceCall(failure = DeviceFailureKind.INVALID_OUTPUT, detail = "ADB reverse cleanup returned unexpected output.")
+        }
+        return DeviceCall(Unit)
+    }
+
     override fun tap(
         serial: String,
         coordinates: TapCoordinates,
@@ -285,6 +328,10 @@ class SmokeAdbClient(
                 stdoutFile,
             ),
         )
+}
+
+private fun validatePort(port: Int) {
+    require(port in 1..65535) { "TCP port must be between 1 and 65535." }
 }
 
 private fun <T> CommandResult.failureCall(detail: String): DeviceCall<T> =

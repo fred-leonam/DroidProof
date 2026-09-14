@@ -7,6 +7,7 @@ import io.github.fredleonam.droidproof.evidence.TIMELINE_FILE
 import io.github.fredleonam.droidproof.evidence.V3_SCHEMA_VERSION
 import io.github.fredleonam.droidproof.evidence.evidenceJson
 import io.github.fredleonam.droidproof.model.BundleRelativePath
+import io.github.fredleonam.droidproof.model.EventSource
 import io.github.fredleonam.droidproof.model.EvidenceBundleManifest
 import io.github.fredleonam.droidproof.model.EvidenceBundleManifestV3
 import io.github.fredleonam.droidproof.model.EvidenceFileDescriptor
@@ -115,6 +116,7 @@ class EvidenceReportGenerator {
 
                 append(observedEnvironment(manifest.observedEnvironment))
                 append(timelineSection(timeline, manifest.evidenceFiles, links, integrityBound = true))
+                append(networkSection(timeline, manifest.evidenceFiles, links))
                 append(screenshotSection(manifest.evidenceFiles, links))
                 append(inventorySection(manifest.evidenceFiles, links))
                 append(otherEvidenceSection(manifest.evidenceFiles, links))
@@ -174,6 +176,7 @@ class EvidenceReportGenerator {
                 appendLine("</dl></section>")
                 append(timelineSection(timeline, manifest.evidenceFiles, links, integrityBound = !isV1))
                 if (!isV1) {
+                    append(networkSection(timeline, manifest.evidenceFiles, links))
                     append(screenshotSection(manifest.evidenceFiles, links))
                     append(inventorySection(manifest.evidenceFiles, links))
                     append(otherEvidenceSection(manifest.evidenceFiles, links))
@@ -316,6 +319,45 @@ class EvidenceReportGenerator {
         }
     }
 
+    private fun networkSection(
+        timeline: TimelineDocument,
+        inventory: List<EvidenceFileDescriptor>,
+        links: LinkResolver,
+    ): String {
+        val networkFiles = inventory.filter { it.role == EvidenceFileRole.NETWORK }.associateBy { it.path }
+        val exchanges = timeline.events.filter { it.source == EventSource.MOCK_SERVER }
+        if (exchanges.isEmpty() && networkFiles.isEmpty()) return ""
+        return buildString {
+            appendLine("<section><h2>Network</h2>")
+            appendLine(
+                "<p class=\"muted\">These are bounded observations made by DroidProof's controlled mock server, " +
+                    "not packet-level capture or proof of arbitrary Android traffic.</p>",
+            )
+            if (exchanges.isEmpty()) {
+                appendLine("<p>No correlated mock-server exchange events were recorded.</p></section>")
+                return@buildString
+            }
+            appendLine(
+                "<div class=\"table-scroll\"><table><thead><tr><th>Sequence</th><th>Method</th>" +
+                    "<th>Path</th><th>Response status</th><th>Verified exchange evidence</th></tr></thead><tbody>",
+            )
+            exchanges.forEachIndexed { index, event ->
+                append("<tr><td>${Html.escape(event.attributes["serverSequence"] ?: (index + 1).toString())}</td>")
+                append("<td>${Html.escape(event.attributes["method"] ?: "Unavailable")}</td>")
+                append("<td>${Html.escape(event.attributes["path"] ?: "Unavailable")}</td>")
+                append("<td>${Html.escape(event.attributes["responseStatus"] ?: "Unavailable")}</td><td>")
+                val references = event.evidence.filter { it.path in networkFiles }
+                if (references.isEmpty()) {
+                    append("<span class=\"muted\">None</span>")
+                } else {
+                    append(references.joinToString(", ") { evidenceLink(it.path, links) })
+                }
+                appendLine("</td></tr>")
+            }
+            appendLine("</tbody></table></div></section>")
+        }
+    }
+
     private fun inventorySection(
         inventory: List<EvidenceFileDescriptor>,
         links: LinkResolver,
@@ -344,7 +386,10 @@ class EvidenceReportGenerator {
         inventory: List<EvidenceFileDescriptor>,
         links: LinkResolver,
     ): String {
-        val other = inventory.filterNot { it.role == EvidenceFileRole.SCREENSHOT && it.mediaType == "image/png" }
+        val other =
+            inventory.filterNot {
+                (it.role == EvidenceFileRole.SCREENSHOT && it.mediaType == "image/png") || it.role == EvidenceFileRole.NETWORK
+            }
         if (other.isEmpty()) return ""
         return buildString {
             appendLine("<section><h2>Other evidence</h2><ul class=\"links\">")

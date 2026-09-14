@@ -15,6 +15,8 @@ internal open class FakeSmokeDevice : SmokeDeviceOperations {
     var preflightResult: DeviceCall<Unit> = DeviceCall(Unit)
     var installResult: DeviceCall<Unit> = DeviceCall(Unit)
     var launchResult: DeviceCall<Unit> = DeviceCall(Unit)
+    var reverseResult: DeviceCall<Unit> = DeviceCall(Unit)
+    var removeReverseResult: DeviceCall<Unit> = DeviceCall(Unit)
     var tapResult: DeviceCall<Unit> = DeviceCall(Unit)
     var inputTextResult: DeviceCall<Unit> = DeviceCall(Unit)
     var afterOperation: (String) -> Unit = {}
@@ -68,6 +70,27 @@ internal open class FakeSmokeDevice : SmokeDeviceOperations {
     ): DeviceCall<Unit> {
         operations += "launch:$serial:$component"
         return launchResult
+    }
+
+    override fun reverseTcp(
+        serial: String,
+        devicePort: Int,
+        hostPort: Int,
+        timeoutMillis: Long,
+    ): DeviceCall<Unit> {
+        operations += "reverse:$serial:$devicePort:$hostPort"
+        afterOperation("reverse")
+        return reverseResult
+    }
+
+    override fun removeReverseTcp(
+        serial: String,
+        devicePort: Int,
+        timeoutMillis: Long,
+    ): DeviceCall<Unit> {
+        operations += "reverse-remove:$serial:$devicePort"
+        afterOperation("reverse-remove")
+        return removeReverseResult
     }
 
     override fun tap(

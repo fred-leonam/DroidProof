@@ -66,6 +66,40 @@ class SmokeScenarioTest {
     }
 
     @Test
+    fun `v3 strictly parses a bounded deterministic backend response plan`() {
+        val source = directory.resolve("network.json")
+        Files.writeString(source, NETWORK_SCENARIO)
+
+        val accepted = SmokeScenarioLoader.load(source)
+        val scenario = accepted.scenario as SmokeScenarioV3
+
+        assertEquals(38637, scenario.backendPlan.devicePort)
+        assertEquals(listOf(503, 201), scenario.backendPlan.responsePlan.map { it.status })
+        assertEquals(3, scenario.orderedSteps.size)
+        assertEquals(NETWORK_SCENARIO, accepted.exactBytes.toString(Charsets.UTF_8))
+    }
+
+    @Test
+    fun `v3 rejects unknown fields and unsafe or unbounded network plans`() {
+        listOf(
+            NETWORK_SCENARIO.replace("\"backendPlan\"", "\"unknown\":true,\"backendPlan\""),
+            NETWORK_SCENARIO.replace("\"devicePort\":38637", "\"devicePort\":80"),
+            NETWORK_SCENARIO.replace("\"method\":\"POST\"", "\"method\":\"GET\""),
+            NETWORK_SCENARIO.replace("\"path\":\"/orders\"", "\"path\":\"/other\""),
+            NETWORK_SCENARIO.replace("\"requestBodyLimitBytes\":4096", "\"requestBodyLimitBytes\":0"),
+            NETWORK_SCENARIO.replace("\"responseBodyLimitBytes\":4096", "\"responseBodyLimitBytes\":0"),
+            NETWORK_SCENARIO.replace("\"status\":503", "\"status\":199"),
+            NETWORK_SCENARIO.replace("\"status\":503", "\"status\":503,\"unknown\":true"),
+            NETWORK_SCENARIO.replace(
+                "\"responsePlan\":[{\"status\":503,\"body\":\"{\\\"error\\\":\\\"retry\\\"}\"}," +
+                    "{\"status\":201,\"body\":\"{\\\"orderId\\\":\\\"order-42\\\"}\"}]",
+                "\"responsePlan\":[]",
+            ),
+            NETWORK_SCENARIO.replace("{\\\"error\\\":\\\"retry\\\"}", "x".repeat(4097)),
+        ).forEachIndexed { index, invalid -> assertRejected(invalid, "network invalid case $index") }
+    }
+
+    @Test
     fun `text step validates restricted language and preserves exact bytes and hash`() {
         val source = directory.resolve("text.json")
         Files.writeString(source, TEXT_SCENARIO)
@@ -86,10 +120,13 @@ class SmokeScenarioTest {
         assertRejected(TEXT_SCENARIO.replace("io.droidproof.smoke:id/name", "name"))
     }
 
-    private fun assertRejected(content: String) {
+    private fun assertRejected(
+        content: String,
+        message: String? = null,
+    ) {
         val source = directory.resolve("invalid-${content.hashCode()}.json")
         Files.writeString(source, content)
-        assertFailsWith<Exception> { SmokeScenarioLoader.load(source) }
+        assertFailsWith<Exception>(message) { SmokeScenarioLoader.load(source) }
     }
 
     private companion object {
@@ -112,3 +149,12 @@ internal val TEXT_SCENARIO =
         "\"steps\":[",
         "\"steps\":[{\"type\":\"typeTextUiNode\",\"resourceId\":\"io.droidproof.smoke:id/name\",\"text\":\"DroidProof42\"},",
     ).replace("DroidProof action completed", "Hello DroidProof42")
+
+internal const val NETWORK_SCENARIO =
+    """{"schemaVersion":3,"scenarioId":"smoke-network","expectedPackage":"io.droidproof.smoke",""" +
+        """"launchComponent":"io.droidproof.smoke/io.droidproof.smoke.MainActivity","backendPlan":{"devicePort":38637,""" +
+        """"method":"POST","path":"/orders","requestBodyLimitBytes":4096,"responseBodyLimitBytes":4096,"responsePlan":[""" +
+        """{"status":503,"body":"{\"error\":\"retry\"}"},{"status":201,"body":"{\"orderId\":\"order-42\"}"}]},""" +
+        """"steps":[{"type":"typeTextUiNode","resourceId":"io.droidproof.smoke:id/name","text":"DroidProof42"},""" +
+        """{"type":"tapUiNode","resourceId":"io.droidproof.smoke:id/action"},{"type":"assertUiNode",""" +
+        """"resourceId":"io.droidproof.smoke:id/status","text":"Order order-42 created","deadlineMillis":250,"pollIntervalMillis":100}]}"""
