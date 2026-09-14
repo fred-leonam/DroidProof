@@ -16,6 +16,7 @@ dependencies {
     implementation(project(":droidproof-model"))
     implementation(project(":droidproof-evidence"))
     implementation(project(":droidproof-device"))
+    implementation(project(":droidproof-mock-server"))
     implementation(libs.kotlinx.serialization.json)
     testImplementation(platform(libs.junit.bom))
     testImplementation(libs.junit.jupiter)
@@ -27,6 +28,7 @@ tasks.test {
     inputs.files(
         rootProject.layout.projectDirectory.file("samples/smoke-app/scenarios/interactive-passing.json"),
         rootProject.layout.projectDirectory.file("samples/smoke-app/scenarios/interactive-failing.json"),
+        rootProject.layout.projectDirectory.file("samples/smoke-app/scenarios/network-passing.json"),
     )
     systemProperty("droidproof.repositoryRoot", rootProject.layout.projectDirectory.asFile.absolutePath)
 }

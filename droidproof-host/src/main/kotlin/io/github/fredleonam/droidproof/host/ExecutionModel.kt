@@ -16,6 +16,8 @@ enum class ExecutionStage {
     ASSERTION,
     CAPTURE,
     FINALIZATION,
+    NETWORK_SETUP,
+    NETWORK_EVALUATION,
 }
 
 @Serializable
@@ -58,6 +60,37 @@ data class AssertionDocument(
     val hierarchyPath: BundleRelativePath? = null,
     val successfulHierarchyObservations: Int = 0,
     val detail: String,
+)
+
+@Serializable
+enum class NetworkEvaluationOutcome {
+    MATCHED,
+    MISMATCHED,
+    NOT_EVALUATED,
+}
+
+@Serializable
+data class NetworkExchangeSummary(
+    val sequence: Int,
+    val method: String,
+    val path: String,
+    val responseStatus: Int,
+    val evidencePath: BundleRelativePath,
+)
+
+@Serializable
+data class NetworkEvaluationDocument(
+    val outcome: NetworkEvaluationOutcome,
+    val expectedExchangeCount: Int,
+    val observedExchangeCount: Int,
+    val exchanges: List<NetworkExchangeSummary> = emptyList(),
+    val detail: String,
+    val limitations: List<String> =
+        listOf(
+            "Network evidence records only exchanges observed by DroidProof's controlled mock server.",
+            "It is not packet capture and does not prove the absence or content of arbitrary Android network traffic.",
+            "Server-observed sequence establishes ordering at this server, not a globally synchronized causal clock.",
+        ),
 )
 
 @Serializable
@@ -106,6 +139,7 @@ data class ExecutionResultDocument(
     val observations: List<HostObservation>,
     val assertion: AssertionDocument,
     val steps: List<StepOutcome> = emptyList(),
+    val network: NetworkEvaluationDocument? = null,
     val primaryError: String? = null,
     val finalizationError: String? = null,
 )

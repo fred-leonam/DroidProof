@@ -1,6 +1,9 @@
 package io.github.fredleonam.droidproof.host
 
 import io.github.fredleonam.droidproof.evidence.Sha256Calculator
+import io.github.fredleonam.droidproof.mockserver.MockServerLimits
+import io.github.fredleonam.droidproof.mockserver.MockServerPlan
+import io.github.fredleonam.droidproof.mockserver.PlannedHttpResponse
 import io.github.fredleonam.droidproof.model.ScenarioId
 import io.github.fredleonam.droidproof.model.Sha256
 import kotlinx.serialization.SerialName
@@ -30,6 +33,43 @@ interface ScenarioDefinition {
     val expectedPackage: String
     val launchComponent: String
     val orderedSteps: List<ScenarioStep>
+    val backendPlan: ScenarioBackendPlan? get() = null
+}
+
+@Serializable
+data class ScenarioBackendPlan(
+    val devicePort: Int,
+    val method: String,
+    val path: String,
+    val requestBodyLimitBytes: Long,
+    val responseBodyLimitBytes: Long,
+    val responsePlan: List<PlannedHttpResponse>,
+) {
+    init {
+        require(devicePort in 1024..65535) { "Device backend port must be between 1024 and 65535." }
+        require(requestBodyLimitBytes in 1..MAX_NETWORK_BODY_BYTES) { "Request-body limit is outside supported bounds." }
+        require(responseBodyLimitBytes in 1..MAX_NETWORK_BODY_BYTES) { "Response-body limit is outside supported bounds." }
+        val serverPlan = MockServerPlan(method, path, responsePlan)
+        responsePlan.forEach { response ->
+            require(response.mediaType == "application/json") { "Scenario-v3 responses must use application/json." }
+            require(runCatching { scenarioJson.parseToJsonElement(response.body) }.isSuccess) {
+                "Scenario-v3 response bodies must be valid JSON."
+            }
+            require(response.body.toByteArray(StandardCharsets.UTF_8).size.toLong() <= responseBodyLimitBytes) {
+                "Planned response body exceeds the configured response-body limit."
+            }
+        }
+        require(serverPlan.responses.size + EXTRA_EXCHANGE_ALLOWANCE <= MAX_NETWORK_EXCHANGES)
+    }
+
+    fun serverPlan(): MockServerPlan = MockServerPlan(method, path, responsePlan)
+
+    fun serverLimits(): MockServerLimits =
+        MockServerLimits(
+            requestBodyLimitBytes,
+            responseBodyLimitBytes,
+            responsePlan.size + EXTRA_EXCHANGE_ALLOWANCE,
+        )
 }
 
 @Serializable
@@ -93,6 +133,26 @@ data class SmokeScenarioV2(
 
     init {
         require(schemaVersion == 2) { "Unsupported scenario schema version." }
+        validateScope(expectedPackage, launchComponent)
+        require(steps.size in 1..100) { "Scenario must contain 1 to 100 steps." }
+        require(steps.last() is AssertUiNode) { "Scenario must end with an assertion." }
+        steps.forEach { validateResource(expectedPackage, it.resourceId) }
+    }
+}
+
+@Serializable
+data class SmokeScenarioV3(
+    override val schemaVersion: Int,
+    override val scenarioId: ScenarioId,
+    override val expectedPackage: String,
+    override val launchComponent: String,
+    override val backendPlan: ScenarioBackendPlan,
+    val steps: List<ScenarioStep>,
+) : ScenarioDefinition {
+    override val orderedSteps: List<ScenarioStep> get() = steps
+
+    init {
+        require(schemaVersion == 3) { "Unsupported scenario schema version." }
         validateScope(expectedPackage, launchComponent)
         require(steps.size in 1..100) { "Scenario must contain 1 to 100 steps." }
         require(steps.last() is AssertUiNode) { "Scenario must end with an assertion." }
@@ -181,6 +241,7 @@ object SmokeScenarioLoader {
             when (version) {
                 1 -> scenarioJson.decodeFromString<SmokeScenario>(text)
                 2 -> scenarioJson.decodeFromString<SmokeScenarioV2>(text)
+                3 -> scenarioJson.decodeFromString<SmokeScenarioV3>(text)
                 else -> error("Unsupported scenario schema version: $version.")
             }
         return AcceptedScenario(scenario, bytes, Sha256Calculator.calculate(ByteArrayInputStream(bytes)))
@@ -190,6 +251,9 @@ object SmokeScenarioLoader {
 private const val MAX_SCENARIO_BYTES = 1024L * 1024L
 private const val MAX_TEXT_LENGTH = 1024
 private const val MAX_ASSERTION_DEADLINE_MILLIS = 300_000L
+private const val MAX_NETWORK_BODY_BYTES = 1024L * 1024L
+private const val MAX_NETWORK_EXCHANGES = 64
+private const val EXTRA_EXCHANGE_ALLOWANCE = 8
 private val PACKAGE_NAME = Regex("[a-zA-Z][a-zA-Z0-9_]*(?:\\.[a-zA-Z][a-zA-Z0-9_]*)+")
 private val CLASS_NAME = Regex("[a-zA-Z][a-zA-Z0-9_]*(?:\\.[a-zA-Z][a-zA-Z0-9_]*)+")
 private val RESOURCE_ID = Regex("[a-zA-Z][a-zA-Z0-9_.]*:id/[a-zA-Z][a-zA-Z0-9_]*")

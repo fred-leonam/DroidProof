@@ -6,4 +6,8 @@
     <string name="action_completed">DroidProof action completed</string>
     <string name="name">Test name</string>
     <string name="greeting">Hello %1$s</string>
+    <string name="order_action">Create order</string>
+    <string name="order_submitting">Creating order</string>
+    <string name="order_created">Order %1$s created</string>
+    <string name="order_failed">Order failed</string>
 </resources>

@@ -166,4 +166,31 @@ class SmokeAdbClientTest {
             assertFalse(result.detail.orEmpty().contains("private stderr"))
         }
     }
+
+    @Test
+    fun `ADB reverse setup and cleanup are serial scoped bounded and validated`() {
+        val requests = mutableListOf<CommandRequest>()
+        val client =
+            SmokeAdbClient(
+                Path.of("/fake/adb"),
+                CommandRunner {
+                    requests += it
+                    CommandResult()
+                },
+            )
+
+        assertTrue(client.reverseTcp("emulator-5554", 38637, 43210, 321).isSuccessful)
+        assertTrue(client.removeReverseTcp("emulator-5554", 38637, 654).isSuccessful)
+        assertEquals(
+            listOf("/fake/adb", "-s", "emulator-5554", "reverse", "tcp:38637", "tcp:43210"),
+            requests[0].arguments,
+        )
+        assertEquals(
+            listOf("/fake/adb", "-s", "emulator-5554", "reverse", "--remove", "tcp:38637"),
+            requests[1].arguments,
+        )
+        assertEquals(listOf(321L, 654L), requests.map { it.timeoutMillis })
+        assertFailsWith<IllegalArgumentException> { client.reverseTcp("emulator-5554", 0, 43210, 100) }
+        assertFailsWith<IllegalArgumentException> { client.removeReverseTcp("bad;serial", 38637, 100) }
+    }
 }

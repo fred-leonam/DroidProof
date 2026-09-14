@@ -91,6 +91,10 @@ class EvidenceReportGeneratorTest {
             "Unavailable: Locale &lt;not observed&gt;",
             "scenario.step.assert",
             "state &amp; result",
+            "Network",
+            "POST",
+            "/orders",
+            "network/exchanges/001.json",
             "screenshots/display.png",
             "image/png",
             "execution/result.json",
@@ -129,6 +133,8 @@ class EvidenceReportGeneratorTest {
             "&lt;img src=x onerror=alert(1)&gt; &amp; &quot;quoted&quot; &#39;value&#39;",
             "Unavailable: Locale &lt;not observed&gt; &amp; &quot;unknown&quot; &#39;reason&#39;",
             "attachments/a&amp;b&#39;.txt",
+            "POST&lt;script&gt;",
+            "/orders?x=&lt;script&gt;&amp;y=&#39;value&#39;",
         )
         assertFalse(html.contains("<script>"))
         assertFalse(html.contains("<img src=x onerror"))
@@ -149,6 +155,22 @@ class EvidenceReportGeneratorTest {
         assertFalse(html.contains("<img"))
         assertFalse(html.contains("href=\""))
         assertFalse(html.contains("smoke-report-run"))
+    }
+
+    @Test
+    fun `tampered network evidence produces only the limited diagnostic report`() {
+        val bundle = writeV3Bundle("tampered-network")
+        bundle.resolve("network/exchanges/001.json").writeText("tampered\n")
+        val report = directory.resolve("tampered-network.html")
+
+        val result = generator.generate(bundle, report)
+        val html = report.readText()
+
+        assertFalse(result.verification.isValid)
+        assertTrue(result.verification.errors.any { it.code == VerificationIssueCode.SHA256_MISMATCH })
+        assertContainsAll(html, "Bundle verification failed", "network/exchanges/001.json")
+        assertFalse(html.contains("<h2>Network</h2>"))
+        assertFalse(html.contains("/orders"))
     }
 
     @Test
@@ -300,6 +322,7 @@ class EvidenceReportGeneratorTest {
         val hierarchy = source("$name-hierarchy.xml", "<hierarchy/>\n")
         val screenshot = directory.resolve("$name-screenshot.png").also { it.writeBytes(ONE_PIXEL_PNG) }
         val attachment = source("$name-attachment.txt", "attachment\n")
+        val network = source("$name-network.json", "{\"sequence\":1}\n")
         val digest = Sha256("a".repeat(64))
         val packageName = if (hostile) "io.example.<script>&\"'" else "io.example.report"
         val reason =
@@ -374,6 +397,19 @@ class EvidenceReportGeneratorTest {
                                 EvidenceReference(BundleRelativePath("screenshots/display.png"), "image/png"),
                             ),
                         ),
+                        TimelineEvent(
+                            EventId("network-001"),
+                            UtcTimestamp("2026-09-13T10:15:31Z"),
+                            EventSource.MOCK_SERVER,
+                            "http.exchange",
+                            mapOf(
+                                "serverSequence" to "1",
+                                "method" to if (hostile) "POST<script>" else "POST",
+                                "path" to if (hostile) "/orders?x=<script>&y='value'" else "/orders",
+                                "responseStatus" to "201",
+                            ),
+                            listOf(EvidenceReference(BundleRelativePath("network/exchanges/001.json"), "application/json")),
+                        ),
                     ),
                     listOf(
                         EvidenceFileInput(
@@ -406,6 +442,12 @@ class EvidenceReportGeneratorTest {
                             BundleRelativePath("attachments/a&b'.txt"),
                             "text/plain",
                             EvidenceFileRole.ATTACHMENT,
+                        ),
+                        EvidenceFileInput(
+                            network,
+                            BundleRelativePath("network/exchanges/001.json"),
+                            "application/json",
+                            EvidenceFileRole.NETWORK,
                         ),
                     ),
                 ),

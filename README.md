@@ -1,102 +1,77 @@
 # DroidProof
 
-**Reproducible, evidence-oriented verification for Android applications.**
+**Artifact-bound, evidence-oriented verification for Android applications.**
 
-DroidProof is a planned open-source Android verification harness that will turn test executions into artifact-bound, human-readable, and machine-readable evidence. It will correlate application identity, device configuration, UI state, screenshots, semantics, logs, and network activity to show how a specific Android build behaved under a defined scenario.
+DroidProof is an early Kotlin/JVM prototype. Its current vertical slice installs an exact APK on an explicitly selected emulator, executes a narrow ordered UI scenario, can run the sample application's real HTTP retry against a controlled local backend, captures UI and network observations, publishes an integrity-bound evidence bundle, verifies it, and renders an offline HTML report.
 
-> [!IMPORTANT]
-> DroidProof is currently in early development. The JVM evidence core, read-only ADB device capture adapter, one narrow artifact-bound Android smoke scenario, and offline static HTML reporting are implemented. These APIs are not yet a stable release.
+The APIs and schemas are not a stable release.
 
 ## Current implementation
 
-The current executable slices provide platform-independent Kotlin/JVM modules:
+- `droidproof-model` owns validated evidence identities, portable bundle paths, evidence descriptors, schema-v1/v2 legacy manifests, the schema-v3 execution manifest, and canonical timeline events.
+- `droidproof-evidence` transactionally writes bundles, streams SHA-256 and byte-size inventory data, and verifies schemas v1, v2, and v3 with structured issues. Its synthetic sample now receives the authoritative Gradle project version.
+- `droidproof-device` provides bounded ADB process execution and explicit screenshot, allowlisted metadata, and opt-in PID-filtered logcat collection.
+- `droidproof-mock-server` is a small Android-independent JDK HTTP server. It binds only to `127.0.0.1`, uses an ephemeral host port, serves the narrow deterministic `POST /orders` response plan, records bounded exchanges, and exposes explicit start/inspect/stop lifecycle methods.
+- `droidproof-host` performs preflight, exact APK byte binding, optional mock-server and serial-scoped ADB reverse setup, activity launch, ordered UI steps, screenshot capture, final APK identity checking, network evaluation, cleanup, bundle publication, and verification.
+- `droidproof-report` verifies a bundle before rendering a deterministic static HTML report. Valid network bundles get a Network section with safe exchange metadata and links to verified exchange files. Invalid bundles get only a limited diagnostic report.
+- `samples/smoke-app` preserves the v1/v2 greeting flow and adds a separate real HTTP order action. That action performs network I/O off the main thread, retries exactly once after HTTP 503, accepts the deterministic HTTP 201 JSON order ID, and displays `Order order-42 created`.
 
-- `droidproof-model` defines validated identities, portable bundle paths, evidence descriptors, schema-v2 environment contracts, schema-v3 execution manifests, and timeline events.
-- `droidproof-evidence` copies evidence through bounded buffers, calculates SHA-256 and byte size while streaming, writes bundles transactionally, and verifies existing bundles with structured issue codes.
-- `droidproof-device` collects observed device metadata, a display screenshot, and optional PID-filtered logcat through installed ADB Platform Tools. It depends on the model; the evidence core does not depend on device code.
-- `droidproof-host` executes one strict JSON smoke scenario against an explicitly selected test emulator, binds the installed APK bytes before and after observation, launches one activity, runs the narrow ordered schema-v2 actions `typeTextUiNode`, `tapUiNode`, and `assertUiNode`, and writes a verified schema-v3 bundle.
-- `droidproof-report` verifies an existing bundle and generates one deterministic, offline static HTML report with inline CSS. It depends only on the model and evidence modules, not Android, ADB, or host execution internals.
-
-Schema version 2 binds every copied evidence file to the manifest. Inventory paths are deterministic and lexicographically ordered. Schema version 1 remains readable, but its verification result warns that file integrity is unavailable instead of claiming success for checks that format cannot support. See [ADR 0002](docs/adr/0002-evidence-file-integrity.md) for the compatibility and path-safety policy.
-
-Build and test it with JDK 17:
+Build and test all JVM modules with JDK 17:
 
 ```bash
 ./gradlew check
 ```
 
-### 1. Synthetic bundle generation
+This root verification does not require an Android SDK, ADB executable, emulator, device, Internet connection, or external server. Mock-server tests use only an owned loopback server.
 
-Generate the deterministic checkout retry example (no SDK or device required):
+## Versioned contracts
+
+Scenario schema versions and evidence schema versions are separate contracts.
+
+- Scenario v1 retains its single exact UI assertion.
+- Scenario v2 retains the ordered `typeTextUiNode`, `tapUiNode`, and `assertUiNode` actions. Existing checked-in v1/v2 scenarios remain valid and keep their behavior.
+- Scenario v3 adds one narrow `backendPlan` for `POST /orders`, a stable device-side port, strict request/response byte limits, and an ordered `responsePlan`. It does not change v2 semantics or provide arbitrary scripting.
+- Evidence schema v1 remains readable with a `FILE_INTEGRITY_UNAVAILABLE` warning.
+- Evidence schema v2 retains its integrity-bound file inventory and synthetic writer.
+- Evidence schema v3 remains the execution-bundle format. The network milestone does not bump it: `EvidenceFileRole.NETWORK`, `EventSource.MOCK_SERVER`, inventory bindings, and timeline evidence references already express the new observations.
+
+Unknown scenario and evidence fields fail parsing. Scenario documents are bounded to 1 MiB and preserved byte-for-byte with their SHA-256. UI selectors remain package-qualified; input text remains restricted to 1–128 non-secret ASCII identifier characters.
+
+## Synthetic evidence without Android
 
 ```bash
 ./gradlew :droidproof-evidence:generateSampleEvidence
 ```
 
-The generated bundle is at `droidproof-evidence/build/droidproof-samples/proof-checkout-offline-retry/`. It is build output and is not committed.
+This writes and verifies `droidproof-evidence/build/droidproof-samples/proof-checkout-offline-retry/`. It is a schema-v2 API sample; its network document is synthetic and is distinct from the real mock-server observations produced by scenario v3.
 
-Verify a bundle programmatically:
+## Standalone device capture
 
-```kotlin
-val result = EvidenceBundleVerifier().verify(bundlePath)
-if (!result.isValid) {
-    result.errors.forEach { issue ->
-        println("${issue.code}: ${issue.path ?: "bundle"}: ${issue.message}")
-    }
-}
-```
-
-The sample generation task runs this verifier itself and fails if the generated bundle is invalid.
-
-Hashes verify consistency against the supplied manifest, not authenticity or application correctness. Someone who can change both a file and its manifest can produce another self-consistent bundle. Bundle replacement provides rollback for caught installation failures using backup and rename; it is not a crash-atomic transaction.
-
-### 2. Real device capture
-
-Use an already-authorized test device or emulator and installed Android SDK Platform Tools. Confirm the serial belongs to the intended test device before collecting its display. Screenshots, device identity, and logs can contain sensitive information; keep captures local and do not upload them as CI artifacts.
+Use an already-authorized device or emulator and installed Android SDK Platform Tools:
 
 ```bash
-# Replace emulator-5554 with the serial of your authorized test emulator/device.
 ./gradlew :droidproof-device:captureDeviceEvidence \
   -Pdroidproof.deviceSerial=emulator-5554
-
-# An explicit executable path may contain spaces; quote the whole property argument.
-./gradlew :droidproof-device:captureDeviceEvidence \
-  '-Pdroidproof.adbPath=/opt/Android SDK/platform-tools/adb' \
-  -Pdroidproof.deviceSerial=emulator-5554
-
-# Opt in to a bounded snapshot for a known positive process ID.
-./gradlew :droidproof-device:captureDeviceEvidence \
-  -Pdroidproof.deviceSerial=emulator-5554 \
-  -Pdroidproof.includeLogcat=true -Pdroidproof.pid=12345 \
-  -Pdroidproof.commandTimeoutMillis=15000 \
-  -Pdroidproof.textLimitBytes=65536 \
-  -Pdroidproof.screenshotLimitBytes=33554432 \
-  -Pdroidproof.logcatLimitBytes=1048576
 ```
 
-All project properties are optional except `droidproof.pid` when logcat is enabled; omit PID when logcat is disabled. `deviceSerial` may be omitted only when exactly one device is listed, and it must be authorized and online. With multiple devices, offline and unauthorized entries still count toward ambiguity. The exact supplied serial is required when configured.
+ADB resolution order is an explicit `droidproof.adbPath`, `ANDROID_HOME/platform-tools`, legacy `ANDROID_SDK_ROOT/platform-tools`, then `PATH`. DroidProof does not install SDK tools, accept licenses, authorize devices, restart the shared ADB server, or bypass secure windows. The explicit capture task is not part of `check`.
 
-ADB is resolved at task execution: `droidproof.adbPath` first (invalid explicit paths fail), then `ANDROID_HOME/platform-tools`, then legacy `ANDROID_SDK_ROOT/platform-tools`, then nonempty `PATH` entries. Windows uses `adb.exe`. DroidProof does not install tools, accept licenses, restart the shared ADB server, or change machine settings. Ordinary ADB clients may start the shared server if it is absent.
+Optional PID-filtered logcat remains opt-in:
 
-The defaults for limits are shown above; timeout is per command, between 1 and 3,600,000 milliseconds, and byte limits are between 1 and 2,147,483,647. Text stdout and stderr are independently bounded; screenshot and logcat limits replace the stdout limit for those operations. PNG validation also caps decoded images at 16,777,216 pixels and 100,000 chunks. The task is explicit, never part of `check` or `test`, never up-to-date or restored from the build cache, and supports the repository's configuration cache. Missing ADB does not affect configuration or offline tests.
+```bash
+./gradlew :droidproof-device:captureDeviceEvidence \
+  -Pdroidproof.deviceSerial=emulator-5554 \
+  -Pdroidproof.includeLogcat=true \
+  -Pdroidproof.pid=12345
+```
 
-Each invocation creates a fresh directory under `droidproof-device/build/droidproof-captures/` containing:
+See [ADR 0003](docs/adr/0003-android-device-capture.md) for output, timeout, privacy, and attribution limits.
 
-- `capture.json`: collector schema version 1, observed metadata, host collection timestamps, outcomes, issues, relative file descriptors, and limitations;
-- `screenshots/display.png`: published only after a successful command and bounded PNG validation;
-- `logs/logcat.txt`: published only after an explicitly requested, successful, nonempty PID-filtered snapshot.
+## Real deterministic network demonstration
 
-Logcat is disabled by default. It uses `logcat -d --pid=<PID> -v threadtime` only after the device's help advertises PID filtering. Unsupported filtering never falls back to device-wide logs. Empty, failed, unsupported, and output-limited snapshots have distinct outcomes; partial logs are not published as complete. A log failure preserves a successful screenshot and makes the result partial. The Gradle task exits unsuccessfully for partial or failed captures and prints the output location. An output-root or `capture.json` write failure can prevent a result document; already published files remain local for inspection.
+The live task requires one local APK, the exact serial of an already-authorized emulator in primary user 0, and installed ADB. It does not create or boot an emulator.
 
-PID reuse, process restarts, historical log retention, device permissions, and log filtering limit attribution. A snapshot contains only currently retained accessible records; it does not establish complete application history. No logs are cleared, apps started/stopped, or processes discovered. Host start/end timestamps use an injectable host clock and are collection observations, not application event times or a cross-process causal clock. A valid screenshot may show a blank/protected screen or another application. Secure-window restrictions are never bypassed, and no rendering correctness is inferred. Two real captures are not expected to be byte-identical.
-
-`DeviceCollector.capture(CaptureRequest(...))` returns `CaptureResult` with `CollectedFile` values. Each contains a local source `Path`, a validated `BundleRelativePath` destination, media type, and `EvidenceFileRole`. A future coordinator can map these into `EvidenceFileInput`; host absolute source paths are not serialized. The offline integration test exercises this mapping and verifies a schema-v2 bundle using explicitly synthetic manifest values.
-
-### 3. Artifact-bound smoke scenario
-
-The live task requires one local APK, one checked JSON scenario and the exact serial of an already-authorized test emulator. It never runs from `check` or `test`, never starts an emulator, and is never treated as up-to-date or restored from cache. Logcat stays disabled.
-
-Build the standalone sample separately. Android Gradle Plugin 8.8.2 requires Gradle 8.10.2 and JDK 17; the sample compiles against Android API level 35. Generate the disposable development key outside the repository:
+Build the standalone non-debuggable sample release. Android Gradle Plugin 8.8.2 uses Gradle 8.10.2, JDK 17, and Android compile SDK 35. Generate a disposable local key outside the repository:
 
 ```bash
 keytool -genkeypair -keystore /tmp/droidproof-smoke-keystore.jks \
@@ -111,277 +86,109 @@ DROIDPROOF_SAMPLE_KEY_PASSWORD=droidproof \
   -Pdroidproof.sample.keyAlias=droidproof-smoke
 ```
 
-Run the schema-v2 interactive passing scenario after confirming the serial belongs to the intended test emulator:
+Confirm the emulator serial, then run the checked-in scenario-v3 demonstration:
 
 ```bash
 ./gradlew :droidproof-host:runSmokeScenario \
   -Pdroidproof.apkPath=samples/smoke-app/build/outputs/apk/release/DroidProofSmokeApp-release.apk \
-  -Pdroidproof.scenarioPath=samples/smoke-app/scenarios/interactive-passing.json \
+  -Pdroidproof.scenarioPath=samples/smoke-app/scenarios/network-passing.json \
   -Pdroidproof.deviceSerial=emulator-5554 \
-  -Pdroidproof.adbPath=/home/user/Android/Sdk/platform-tools/adb
+  -Pdroidproof.adbPath=/absolute/path/to/Android/Sdk/platform-tools/adb
 ```
 
-Run the intentionally failing schema-v2 scenario by changing the path to `samples/smoke-app/scenarios/interactive-failing.json`. It performs the same text entry and tap, then expects the wrong greeting. The task is expected to exit unsuccessfully while preserving an integrity-valid failed-scenario bundle. The schema-v1 `passing.json` and `failing.json` scenarios remain checked in as backward-compatibility examples. Add `-Pdroidproof.replaceExisting=true` only when intentionally replacing different bytes already installed for the target package. Set `-Pdroidproof.adbPath=/absolute/path/to/adb` when discovery is unsuitable.
+The scenario enters `DroidProof42`, taps `order_action`, and asserts `Order order-42 created`. During execution DroidProof:
 
-Scenario schema v2 supports only the ordered actions `typeTextUiNode`, `tapUiNode`,
-and `assertUiNode`. The checked-in interactive example enters `DroidProof42` into
-the exact package/resource-ID field, taps the exact action button, and asserts the
-exact greeting `Hello DroidProof42`. V2 accepts 1–100 steps and requires a final
-assertion. Text input is restricted to 1–128 ASCII letters, digits, `.`, `_`, `-`,
-and `@`; tap and input selectors contain only a package-qualified resource ID.
-Assertion steps add exact text, `deadlineMillis`, and `pollIntervalMillis`. Unknown
-fields and action types fail parsing. This is a deliberately narrow execution
-format, not a general-purpose scenario DSL.
+1. starts `droidproof-mock-server` on an ephemeral `127.0.0.1` host port;
+2. creates `adb -s <serial> reverse tcp:38637 tcp:<host-port>`;
+3. observes the application's first `POST /orders` and returns HTTP 503;
+4. observes its one deterministic retry and returns HTTP 201 with `{"orderId":"order-42"}`;
+5. evaluates both the ordered server exchange sequence and final UI assertion;
+6. removes only the owned reverse mapping and stops the owned server; and
+7. publishes and verifies the evidence bundle.
 
-Execution result schema 2 records every step, including errors and skips. Valid
-step hierarchies are inventoried at `ui/steps/NNN-input-before.xml`,
-`ui/steps/NNN-tap-before.xml`, or `ui/steps/NNN-assert.xml` and referenced by typed
-timeline events. Text entry resolves a fresh hierarchy, taps the field to establish
-focus, then invokes bounded ADB text input. A mutation error prevents later steps
-and makes the verdict `NOT_EVALUATED`; an observed assertion nonmatch remains
-`FAILED`. See [ADR 0005](docs/adr/0005-ordered-ui-steps.md) and
-[ADR 0006](docs/adr/0006-bounded-ui-text-entry.md) for the contract and interaction
-limits.
+There is no fallback to LAN or uncontrolled networking if setup fails. Reverse removal and server shutdown are attempted after success, assertion failure, host failure, timeout, and cancellation. Cleanup errors do not replace the original failure.
 
-Each invocation uses a fresh location below `droidproof-host/build/droidproof-runs/`. A published bundle contains `manifest.json`, `timeline.json`, the exact accepted `scenario/scenario.json`, execution and artifact-binding documents, the retained UI hierarchy, collector metadata and screenshot when available. The task succeeds only when execution completed, the assertion passed, required evidence is complete and bundle verification succeeded.
+The task writes a fresh directory below `droidproof-host/build/droidproof-runs/` and prints its location. A successful network run has a layout equivalent to:
 
-Schema version 3 records requested configuration separately from observed environment values. Unknown locale, orientation, animation scales, random seed and application clock remain unavailable with reasons; no placeholder values are invented. `ScenarioIdentity.dataSha256` is the hash of the exact bytes stored at `scenario/scenario.json`. Schema v1/v2 reading and the schema-v2 synthetic writer remain supported. See [ADR 0004](docs/adr/0004-artifact-bound-android-smoke-execution.md).
+```text
+bundle/
+├── manifest.json
+├── timeline.json
+├── scenario/scenario.json
+├── execution/
+│   ├── artifact-binding.json
+│   └── result.json
+├── ui/steps/
+│   ├── 001-input-before.xml
+│   ├── 002-tap-before.xml
+│   └── 003-assert.xml
+├── capture/capture.json
+├── screenshots/display.png
+└── network/exchanges/
+    ├── 001.json
+    └── 002.json
+```
 
-The verdict proves only that one package/resource-ID/exact-text node was exposed by the accessibility hierarchy for the identified APK at the recorded observation points. Screenshot and hierarchy are sequential observations. APK hash equality is not continuous attestation, hashes do not authenticate the producer, and no certificate fingerprint is claimed.
+Each network exchange document comes from the actual controlled server observation and contains a host observation timestamp, server sequence, bounded method/path, bounded request and response body metadata, response status, and response-plan match metadata. Request and response bodies are not copied into exchange documents; configured response bodies remain in the exact scenario evidence. Every network file is inventoried with role `network`, byte size, and SHA-256, and every server event links to its file from the canonical timeline.
 
-### 4. Offline HTML evidence report
+Success requires completed execution, matched UI assertion, matched ordered network expectation, matching APK bytes before and after, complete required evidence, and successful bundle verification. A UI pass with a network mismatch and a network match with a UI failure are both behavioral failures. Infrastructure failure or cancellation yields `NOT_EVALUATED`, rather than a fabricated behavioral result.
 
-Generate a report from any existing DroidProof evidence bundle:
+The v1 `passing.json`/`failing.json` and v2 `interactive-passing.json`/`interactive-failing.json` demonstrations remain available. Add `-Pdroidproof.replaceExisting=true` only when intentionally replacing different installed bytes for the target package.
+
+## Offline HTML report
+
+Generate a report from a preserved bundle, using paths outside that bundle:
 
 ```bash
 ./gradlew :droidproof-report:generateEvidenceReport \
   -Pdroidproof.bundlePath=/absolute/path/to/bundle
-```
 
-The default output is `droidproof-report/build/reports/droidproof/evidence-report.html`. Select another location outside the source bundle with:
-
-```bash
 ./gradlew :droidproof-report:generateEvidenceReport \
   -Pdroidproof.bundlePath=/absolute/path/to/bundle \
   -Pdroidproof.reportPath=/absolute/path/to/report.html
 ```
 
-The task requires `droidproof.bundlePath`, does not need an Android SDK, ADB, a device, or network access, and is not part of `check`. It never treats external evidence as a cacheable report input and always runs when requested. The source bundle is verified before content is rendered, is never modified, and cannot contain the selected report output.
+The default output is `droidproof-report/build/reports/droidproof/evidence-report.html`. The report has inline CSS, no JavaScript, and no external resources. It shows verified execution, artifact, environment, timeline, screenshot, inventory, and network metadata. Network bodies are not injected into HTML; exchange rows link to verified local evidence files. If any registered network or other evidence is missing or tampered, verification fails and the report omits all unverified artifact, scenario, timeline, network, and preview content.
 
-For schema-v3 execution bundles, the report shows the stored execution status, scenario verdict and evidence completeness; artifact identity and binding observations; requested configuration separately from observed or explicitly unavailable environment values; the canonical timeline; the verified evidence inventory; and local evidence links. A verified PNG screenshot is shown as a bounded preview while continuing to reference the existing bundle file. Arbitrary XML, JSON and other evidence content is linked rather than injected into the page. The report does not derive a different success result from the stored execution model.
+The HTML is a derived view and is not itself evidence. See [ADR 0007](docs/adr/0007-static-html-evidence-reports.md).
 
-Schema-v2 synthetic bundles are rendered with their recorded environment contract, timeline and integrity-checked inventory. Schema-v1 remains supported as an explicitly legacy/limited report: its manifest and timeline can be shown, but the report repeats `FILE_INTEGRITY_UNAVAILABLE` and provides no evidence previews or links because that schema has no file inventory.
+## Security and proof boundary
 
-The generated document is one UTF-8 HTML file with inline CSS and no JavaScript, remote fonts, CDN resources, or network calls. Bundle-derived text and link attributes are centrally HTML-escaped, and links are constructed only from verified, validated evidence paths. Displayed evidence paths remain bundle-relative; moving the report without preserving its filesystem relationship to the bundle can break its local links.
+- The mock server binds only to IPv4 loopback. ADB reverse makes the stable device endpoint available without exposing the server to the LAN.
+- Scenario-v3 body limits are 1 byte through 1 MiB, response plans contain 1–16 responses, and accepted exchange observations are bounded. The checked-in sample uses 4096-byte request and response limits.
+- Network evidence proves what DroidProof's controlled mock server observed and which configured response it selected. It is not packet capture, arbitrary traffic interception, proof that no other calls occurred, TLS interception, or a globally synchronized causal trace.
+- Host, Android, and server wall clocks are not treated as a shared causal clock. The controlled server's sequence establishes order only among its own exchanges.
+- Evidence hashes establish consistency with the manifest, not authenticity. Someone able to rewrite both evidence and manifest can create another self-consistent bundle.
+- Screenshots, UI hierarchy, scenario values, logcat, request metadata, response plans, and network evidence can contain sensitive test data. Keep bundles local or access-controlled; do not automatically upload them as public CI artifacts.
 
-If verification fails, the task writes a limited diagnostic HTML page containing the safely escaped schema version and structured verification issues, omits artifact/scenario claims, timeline links and screenshot previews, then exits unsuccessfully. The HTML is a disposable derived view, not evidence: it is never added to `manifest.evidenceFiles` and is not integrity-bound. SHA-256 verification establishes consistency with the supplied manifest, not authenticity or producer identity. See [ADR 0007](docs/adr/0007-static-html-evidence-reports.md).
+See [ADR 0008](docs/adr/0008-deterministic-network-evidence.md) for the network design and proof boundary.
 
-## Motivation
+## Component status and remaining limitations
 
-A conventional test result usually says that a test passed or failed. It often does not preserve enough context to answer:
+| Component | Status |
+| --- | --- |
+| Evidence model, writer, verifier | Implemented narrow JVM slice |
+| Read-only device capture | Implemented narrow ADB slice |
+| Artifact-bound host smoke execution | Implemented for one APK, one selected emulator, and primary user 0 |
+| Ordered View-based UI text/tap/assert | Implemented narrow resource-ID/exact-text slice |
+| Deterministic loopback mock server and ADB reverse | Implemented for `POST /orders` ordered responses |
+| Real network exchange evidence and report section | Implemented for the controlled server observations |
+| Emulator lifecycle management | Not implemented |
+| Arbitrary traffic interception or TLS MITM | Not implemented |
+| General endpoint scripting or generalized fault injection | Not implemented |
+| Compose semantics, Espresso, or application probes | Not implemented |
+| Published Gradle plugin, general CLI, or general-purpose scenario DSL | Not implemented |
+| Evidence signing or external trust root | Not implemented |
 
-- Which APK or App Bundle was tested?
-- Which device, API level, locale, scenario data, and environment were used?
-- What happened across the UI, application, network, and system layers?
-- Which evidence supports each behavioral assertion?
-- Can the same execution be reproduced later?
-- Can a CI pipeline or coding agent interpret the result without parsing raw logs?
+The next logical slice is broader controlled endpoint behavior and correlation without weakening the current artifact, lifecycle, and evidence boundaries—not arbitrary interception or a general scripting system.
 
-DroidProof aims to provide that missing evidence and reproducibility layer. It is not intended to replace JUnit, Compose Test, Espresso, UI Automator, device farms, or performance tools. It will coordinate and enrich them.
+## Architecture decisions
 
-## Planned architecture
-
-```mermaid
-flowchart TB
-    Gradle["Gradle plugin"] --> Coordinator["Host coordinator"]
-    Coordinator --> Device["Emulator or device"]
-    Coordinator --> MockServer["Mock server"]
-    Device --> App["App + optional probe"]
-    App --> Evidence["Evidence collectors"]
-    MockServer --> Evidence
-    Evidence --> Report["HTML and JSON report"]
-```
-
-### Components
-
-- **Gradle plugin:** discovers scenarios, resolves build variants, and exposes DroidProof tasks.
-- **Host coordinator:** currently controls the narrow smoke execution lifecycle and correlates its host observations.
-- **Device adapter:** installs artifacts and controls emulators or physical devices.
-- **Mock server:** provides deterministic backend responses and controlled failure conditions.
-- **Optional application probe:** exposes selected test hooks in non-production builds.
-- **Evidence collectors:** capture screenshots, semantics, logcat, network exchanges, and environment metadata.
-- **Report generator:** currently produces a static offline human-readable view of existing evidence bundles.
-
-## Core model
-
-DroidProof will treat verification as three versioned inputs and one structured output:
-
-```text
-Android artifact + scenario + environment contract -> evidence bundle
-```
-
-The generated checkout retry bundle contains:
-
-```text
-proof-checkout-offline-retry/
-├── manifest.json
-├── timeline.json
-└── network/
-    └── orders-attempt-2.json
-```
-
-The schema-v2 manifest binds the result to information such as:
-
-- APK or App Bundle hash;
-- signing-certificate fingerprint;
-- Git commit;
-- scenario and scenario-data hashes;
-- device fingerprint and API level;
-- locale, orientation, and animation configuration;
-- random seed and controlled clock, when available;
-- DroidProof version.
-- copied evidence paths, media types, byte sizes, and SHA-256 digests.
-
-The repository can also execute the narrow native smoke scenario described above. Its scenario format supports only `typeTextUiNode`, `tapUiNode`, and `assertUiNode`; it does not provide a general-purpose scenario DSL, Compose semantics, or intercepted network traffic. The sample's network document remains synthetic scenario evidence used to exercise the JVM bundle API. The current HTML report is local and static: it has no hosting, JavaScript UI, authentication, signing, or embedded evidence. Emulator lifecycle control, a mock server, and a general CLI remain unimplemented.
-
-## Key differentiators
-
-### Artifact-bound verification
-
-Every execution will identify the exact application artifact and environment that produced the result.
-
-### Evidence graph
-
-Assertions will be connected to their supporting evidence instead of being presented only as pass/fail values or unrelated attachments.
-
-For example, the claim `order-created-once` may be supported by one HTTP request, one accepted response, a corresponding semantic UI state, and the absence of a duplicate retry.
-
-### Cross-layer timeline
-
-DroidProof will correlate events from the host, Android system, application process, test process, and mock server into a causal execution timeline.
-
-### Deterministic fault injection
-
-Later releases are expected to support repeatable failures positioned around meaningful events, such as terminating a connection after the server commits a request but before the client receives the response.
-
-### Machine-readable results
-
-The JSON evidence format will allow CI pipelines and coding agents to identify the first behavioral divergence without interpreting screenshots or unstructured logs.
-
-## Planned execution modes
-
-| Mode | Artifact | Intended visibility |
-| --- | --- | --- |
-| Black box | Exact signed release APK | Externally observable behavior |
-| Proof release | Minified, non-debuggable release-like build with selected hooks | UI, network, and controlled internal evidence |
-| Instrumented | Debug/test build with the optional probe | Maximum development diagnostics |
-
-Black-box execution will use out-of-process Android testing capabilities so that release builds can be exercised without modifying or weakening the APK.
-
-## Proposed scenario API
-
-The initial API will integrate with Kotlin and JUnit rather than introduce a separate scenario language.
-
-```kotlin
-@get:Rule
-val proof = DroidProofRule(
-    scenarioId = "checkout-offline-retry"
-)
-
-@Test
-fun submitAfterConnectivityReturns() = proof.run {
-    environment {
-        locale("en-US")
-        orientation(Orientation.PORTRAIT)
-
-        backend {
-            get("/checkout/config")
-                .respond(scenarioData("checkout.json"))
-
-            post("/orders")
-                .respondSequence(
-                    httpError(503),
-                    json("order-created.json")
-                )
-        }
-    }
-
-    execute {
-        launchDeepLink("sample://checkout/cart-42")
-        onElement("customer-name").typeText("Alex")
-        onElement("submit").click()
-        process.kill()
-        process.relaunch()
-    }
-
-    verify {
-        screen("order-created")
-        request("/orders").wasSentExactlyOnce()
-        noUnhandledExceptions()
-    }
-}
-```
-
-This API is illustrative and will evolve through executable prototypes and user feedback.
-
-## Proposed modules
-
-```text
-droidproof/
-├── droidproof-model/             # Scenario and evidence models
-├── droidproof-gradle-plugin/     # Gradle tasks and variant integration
-├── droidproof-host/              # Host-side coordinator
-├── droidproof-device/            # Device and emulator control
-├── droidproof-runner/            # Instrumentation integration
-├── droidproof-ui-automator/      # Black-box interactions
-├── droidproof-compose/           # Compose semantic evidence
-├── droidproof-probe/             # Optional build-time application bridge
-├── droidproof-network/           # Recording and fault injection
-├── droidproof-mock-server/       # Deterministic backend simulation
-├── droidproof-evidence/          # Evidence collection and correlation
-├── droidproof-report/            # HTML and JSON reports
-└── samples/                       # Demonstration Android applications
-```
-
-## Technology direction
-
-The first implementation is expected to use:
-
-- Kotlin;
-- Gradle Plugin API;
-- JUnit;
-- AndroidX Test and UI Automator;
-- Compose testing and semantics APIs;
-- Kotlin coroutines;
-- Kotlin serialization;
-- a local JVM mock server;
-- static HTML and JSON report generation.
-
-## Contributing
-
-DroidProof is currently being shaped through architecture experiments. Design discussions, use cases, failure scenarios, and feedback about Android verification workflows will be welcome once the initial repository structure is available.
-
-### Bounded text-entry scenario
-
-Schema v2 also accepts:
-
-```json
-{"type":"typeTextUiNode","resourceId":"io.github.fredleonam.droidproof.smokeapp:id/name","text":"DroidProof42"}
-```
-
-The canonical demonstration is `samples/smoke-app/scenarios/interactive-passing.json`:
-it enters the name, taps the action, and asserts `Hello DroidProof42`.
-`interactive-failing.json` performs the same mutations and intentionally expects the
-wrong greeting. The existing v1 and older text-named examples remain available.
-
-Text is restricted to 1–128 ASCII letters, digits, `.`, `_`, `-`, and `@`.
-Use non-secret test data: the scenario and its requested text are preserved in
-evidence. Whitespace, controls and Unicode are rejected. DroidProof dumps and
-resolves one exact package/resource target, retains the hierarchy, taps its center
-to establish focus, and dispatches bounded text input. It does not clear existing
-text, manage the keyboard, or guarantee that dispatched input reached the view;
-the following assertion provides the behavioral observation.
-
-Input hierarchy evidence is hash/size-bound through the existing writer and
-referenced by the step and `scenario.step.type_text` timeline event. Timeline
-attributes do not repeat input text. See [ADR 0006](docs/adr/0006-bounded-ui-text-entry.md).
+- [ADR 0001](docs/adr/0001-evidence-core.md): platform-independent evidence core
+- [ADR 0002](docs/adr/0002-evidence-file-integrity.md): evidence-file inventory and verification
+- [ADR 0003](docs/adr/0003-android-device-capture.md): bounded read-only Android capture
+- [ADR 0004](docs/adr/0004-artifact-bound-android-smoke-execution.md): artifact-bound smoke execution
+- [ADR 0005](docs/adr/0005-ordered-ui-steps.md): ordered UI steps and bounded tap
+- [ADR 0006](docs/adr/0006-bounded-ui-text-entry.md): bounded text input
+- [ADR 0007](docs/adr/0007-static-html-evidence-reports.md): verified static report
+- [ADR 0008](docs/adr/0008-deterministic-network-evidence.md): deterministic mock-server network evidence

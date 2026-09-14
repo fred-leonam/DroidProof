@@ -10,6 +10,8 @@ import io.github.fredleonam.droidproof.evidence.EvidenceBundleVerifier
 import io.github.fredleonam.droidproof.evidence.EvidenceBundleWriter
 import io.github.fredleonam.droidproof.evidence.EvidenceFileInput
 import io.github.fredleonam.droidproof.evidence.V3_SCHEMA_VERSION
+import io.github.fredleonam.droidproof.mockserver.DeterministicMockServer
+import io.github.fredleonam.droidproof.mockserver.MockServerStarter
 import io.github.fredleonam.droidproof.model.AndroidArtifactIdentity
 import io.github.fredleonam.droidproof.model.AndroidArtifactType
 import io.github.fredleonam.droidproof.model.ArtifactBindingStatus
@@ -78,6 +80,7 @@ class SmokeCoordinator(
     private val cancellation: CancellationSignal = SystemCancellationSignal,
     private val assertionRunner: UiAssertionRunner =
         UiAssertionRunner(device, monotonicClock = monotonicClock, cancellation = cancellation),
+    private val mockServerStarter: MockServerStarter = DeterministicMockServer(wallClock),
     private val idSource: () -> String = { UUID.randomUUID().toString() },
 ) {
     fun run(request: SmokeRunRequest): SmokeRunResult {
@@ -127,6 +130,34 @@ class SmokeCoordinator(
             }
         } else {
             state.skip(ExecutionStage.ARTIFACT_BINDING)
+        }
+
+        val backendPlan = inputs?.scenario?.scenario?.backendPlan
+        var networkSession: ActiveNetworkSession? = null
+        var networkEvaluation: NetworkEvaluationDocument? =
+            backendPlan?.let {
+                NetworkEvaluationDocument(
+                    NetworkEvaluationOutcome.NOT_EVALUATED,
+                    it.responsePlan.size,
+                    0,
+                    detail = "Network setup was not completed.",
+                )
+            }
+        if (backendPlan != null && bindingState != null && state.canUseDevice()) {
+            stage<Unit>(state, ExecutionStage.NETWORK_SETUP) {
+                ensureActive()
+                val setup =
+                    NetworkSessionManager(device, mockServerStarter).start(
+                        backendPlan,
+                        request.deviceSerial,
+                        operationTimeout(request, state),
+                    )
+                setup.cleanupDetail?.let { state.observations += HostObservation(wallClock.instant().toString(), "cleanup", it) }
+                if (setup.failureDetail != null) throw RunAbort(setup.failureDetail, setup.cancelled)
+                networkSession = requireNotNull(setup.session)
+            }
+        } else if (backendPlan != null) {
+            state.skip(ExecutionStage.NETWORK_SETUP)
         }
 
         if (bindingState != null && state.canUseDevice()) {
@@ -181,10 +212,41 @@ class SmokeCoordinator(
                     }
                 } catch (error: RunAbort) {
                     state.failAfterStage(error.message ?: "Final artifact identity check failed.", error.cancelled)
+                } catch (_: Exception) {
+                    state.failAfterStage("Final artifact identity check failed.")
                 }
             }
         } else {
             state.skip(ExecutionStage.CAPTURE)
+        }
+
+        var networkFiles = emptyList<EvidenceFileInput>()
+        var networkEvents = emptyList<TimelineEvent>()
+        if (backendPlan != null && networkSession != null) {
+            val executionFailedBeforeEvaluation = state.primaryError != null || state.cancelled
+            val finish =
+                stage<NetworkFinishResult>(state, ExecutionStage.NETWORK_EVALUATION) {
+                    requireNotNull(networkSession).finish(workDirectory, request.commandTimeoutMillis)
+                }
+            if (finish != null) {
+                networkEvaluation =
+                    if (executionFailedBeforeEvaluation && finish.evaluation.outcome != NetworkEvaluationOutcome.NOT_EVALUATED) {
+                        finish.evaluation.copy(
+                            outcome = NetworkEvaluationOutcome.NOT_EVALUATED,
+                            detail = "Network expectations were not evaluated because execution did not reach a behavioral outcome.",
+                        )
+                    } else {
+                        finish.evaluation
+                    }
+                networkFiles = finish.evidenceFiles
+                networkEvents = finish.timelineEvents
+                if (finish.evaluation.outcome == NetworkEvaluationOutcome.NOT_EVALUATED && !executionFailedBeforeEvaluation) {
+                    state.recordFailure(finish.evaluation.detail, false)
+                }
+                finish.cleanupDetail?.let { state.recordFailure(it, false) }
+            }
+        } else if (backendPlan != null) {
+            state.skip(ExecutionStage.NETWORK_EVALUATION)
         }
 
         val bindingDocument =
@@ -221,6 +283,9 @@ class SmokeCoordinator(
                 bindingState,
                 assertion,
                 captureResult,
+                networkEvaluation,
+                networkFiles,
+                networkEvents,
                 state,
             )
         deleteWorkDirectory(workDirectory)
@@ -403,6 +468,9 @@ class SmokeCoordinator(
         bindingState: ArtifactBindingState?,
         assertionAttempt: UiAssertionAttempt?,
         captureResult: CaptureResult?,
+        networkEvaluation: NetworkEvaluationDocument?,
+        networkFiles: List<EvidenceFileInput>,
+        networkEvents: List<TimelineEvent>,
         state: MutableExecutionState,
     ): SmokeRunResult {
         val finalizationStarted = wallClock.instant().toString()
@@ -413,7 +481,10 @@ class SmokeCoordinator(
                 bindingState.afterCapture.sha256 == accepted.artifact.sha256
         val evaluated = assertionAttempt?.document?.outcome in setOf(AssertionOutcome.MATCHED, AssertionOutcome.NOT_MATCHED)
         val completeness =
-            if (evaluated && hierarchy != null && screenshot != null && finalBindingMatches) {
+            if (
+                evaluated && hierarchy != null && screenshot != null && finalBindingMatches &&
+                networkEvaluation?.outcome != NetworkEvaluationOutcome.NOT_EVALUATED
+            ) {
                 EvidenceCompleteness.COMPLETE
             } else {
                 EvidenceCompleteness.PARTIAL
@@ -427,8 +498,11 @@ class SmokeCoordinator(
         val verdict =
             when {
                 status != ExecutionStatus.COMPLETED -> ScenarioVerdict.NOT_EVALUATED
-                assertionAttempt?.document?.outcome == AssertionOutcome.MATCHED -> ScenarioVerdict.PASSED
+                assertionAttempt?.document?.outcome == AssertionOutcome.MATCHED &&
+                    (networkEvaluation == null || networkEvaluation.outcome == NetworkEvaluationOutcome.MATCHED) ->
+                    ScenarioVerdict.PASSED
                 assertionAttempt?.document?.outcome == AssertionOutcome.NOT_MATCHED -> ScenarioVerdict.FAILED
+                networkEvaluation?.outcome == NetworkEvaluationOutcome.MISMATCHED -> ScenarioVerdict.FAILED
                 else -> ScenarioVerdict.NOT_EVALUATED
             }
         val optimisticFinalStage =
@@ -455,6 +529,7 @@ class SmokeCoordinator(
                 stages = state.stages.toList(),
                 observations = state.observations.toList(),
                 assertion = assertionDocument,
+                network = networkEvaluation,
                 primaryError = state.primaryError,
             )
 
@@ -466,13 +541,14 @@ class SmokeCoordinator(
                     binding,
                     resultDocument,
                     state.stepFiles,
+                    networkFiles,
                     captureResult,
                 )
             val manifest =
                 manifest(request, executionId, accepted, binding, bindingState, captureResult, resultDocument)
             val bundle = runDirectory.resolve("bundle")
             publisher.publish(
-                EvidenceBundleRequestV3(manifest, timeline(resultDocument), sources),
+                EvidenceBundleRequestV3(manifest, timeline(resultDocument, networkEvents), sources),
                 bundle,
             )
             val verification = verifier.verify(bundle)
@@ -504,6 +580,7 @@ class SmokeCoordinator(
         binding: ArtifactBindingDocument,
         result: ExecutionResultDocument,
         stepFiles: List<EvidenceFileInput>,
+        networkFiles: List<EvidenceFileInput>,
         captureResult: CaptureResult?,
     ): List<EvidenceFileInput> {
         val documents = Files.createDirectories(workDirectory.resolve("documents"))
@@ -517,6 +594,7 @@ class SmokeCoordinator(
                 EvidenceFileInput(bindingFile, BINDING_PATH, "application/json", EvidenceFileRole.ATTACHMENT),
             )
         files += stepFiles
+        files += networkFiles
         captureResult?.let { captured ->
             files +=
                 EvidenceFileInput(
@@ -603,8 +681,12 @@ class SmokeCoordinator(
         )
     }
 
-    private fun timeline(result: ExecutionResultDocument): List<TimelineEvent> =
-        result.stages.flatMap { stage ->
+    private fun timeline(
+        result: ExecutionResultDocument,
+        networkEvents: List<TimelineEvent>,
+    ): List<TimelineEvent> =
+        result.stages.flatMapIndexed { stageIndex, stage ->
+            val stageNumber = (stageIndex + 1).toString().padStart(3, '0')
             val evidence =
                 when (stage.stage) {
                     ExecutionStage.ASSERTION ->
@@ -626,7 +708,7 @@ class SmokeCoordinator(
                 if (stage.stage == ExecutionStage.ASSERTION) {
                     result.steps.map { step ->
                         TimelineEvent(
-                            EventId("004-${step.index.toString().padStart(3, '0')}-step"),
+                            EventId("$stageNumber-${step.index.toString().padStart(3, '0')}-step"),
                             UtcTimestamp(step.hostEndedAt),
                             EventSource.HOST,
                             step.type.timelineEventType,
@@ -639,14 +721,14 @@ class SmokeCoordinator(
                 }
             stepEvents +
                 TimelineEvent(
-                    EventId("%03d-%s".format(stage.stage.ordinal + 1, stage.stage.name.lowercase())),
+                    EventId("$stageNumber-${stage.stage.name.lowercase()}"),
                     UtcTimestamp(stage.endedAt),
                     EventSource.HOST,
                     "execution.${stage.stage.name.lowercase()}",
                     attributes = mapOf("status" to stage.status.name),
                     evidence = evidence,
                 )
-        }
+        } + networkEvents
 
     private fun operationTimeout(
         request: SmokeRunRequest,
