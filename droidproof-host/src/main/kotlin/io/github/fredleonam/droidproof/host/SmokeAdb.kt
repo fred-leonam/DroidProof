@@ -6,6 +6,7 @@ import io.github.fredleonam.droidproof.device.CommandResult
 import io.github.fredleonam.droidproof.device.CommandRunner
 import io.github.fredleonam.droidproof.device.DeviceSelector
 import io.github.fredleonam.droidproof.device.ProcessCommandRunner
+import io.github.fredleonam.droidproof.model.EmulatorEnvironmentState
 import io.github.fredleonam.droidproof.model.Orientation
 import java.nio.file.Files
 import java.nio.file.LinkOption
@@ -61,6 +62,29 @@ interface SmokeDeviceOperations {
         serial: String,
         timeoutMillis: Long,
     ): DeviceCall<DeviceAnimationObservations>
+
+    fun snapshotEnvironment(
+        serial: String,
+        timeoutMillis: Long,
+    ): DeviceCall<EmulatorEnvironmentState> =
+        DeviceCall(failure = DeviceFailureKind.UNSUPPORTED, detail = "Environment mutation is unsupported by this device implementation.")
+
+    fun applyEnvironment(
+        serial: String,
+        contract: io.github.fredleonam.droidproof.model.EmulatorEnvironmentContractV1,
+        timeoutMillis: Long,
+    ): DeviceCall<Unit> =
+        DeviceCall(failure = DeviceFailureKind.UNSUPPORTED, detail = "Environment mutation is unsupported by this device implementation.")
+
+    fun restoreEnvironment(
+        serial: String,
+        state: EmulatorEnvironmentState,
+        timeoutMillis: Long,
+    ): DeviceCall<Unit> =
+        DeviceCall(
+            failure = DeviceFailureKind.UNSUPPORTED,
+            detail = "Environment restoration is unsupported by this device implementation.",
+        )
 
     fun packagePaths(
         serial: String,
@@ -126,6 +150,175 @@ class SmokeAdbClient(
     private val executable: Path,
     private val runner: CommandRunner = ProcessCommandRunner(),
 ) : SmokeDeviceOperations {
+    override fun snapshotEnvironment(
+        serial: String,
+        timeoutMillis: Long,
+    ): DeviceCall<EmulatorEnvironmentState> {
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
+        val locale = observeLocale(serial, remainingMillis(deadline))
+        if (!locale.isSuccessful) return DeviceCall(failure = locale.failure, detail = locale.detail)
+
+        fun setting(
+            namespace: String,
+            name: String,
+        ): DeviceCall<String> {
+            val result =
+                run(
+                    target(serial) + listOf("shell", "settings", "--user", "0", "get", namespace, name),
+                    remainingMillis(deadline),
+                    SETTING_LIMIT_BYTES,
+                )
+            val value = if (result.failure == null) singleSettingValue(result) else null
+            return if (value != null) {
+                DeviceCall(
+                    value,
+                )
+            } else {
+                DeviceCall(
+                    failure =
+                        if (result.failure == null) {
+                            DeviceFailureKind.INVALID_OUTPUT
+                        } else {
+                            result.failureCall<DeviceCall<String>>(
+                                "",
+                            ).failure!!
+                        },
+                    detail = "Environment snapshot output was unsupported.",
+                )
+            }
+        }
+        val auto = setting("system", "accelerometer_rotation")
+        val rotation = setting("system", "user_rotation")
+        val window = setting("global", ANIMATION_SETTINGS[0])
+        val transition = setting("global", ANIMATION_SETTINGS[1])
+        val animator = setting("global", ANIMATION_SETTINGS[2])
+        val values = listOf(auto, rotation, window, transition, animator)
+        values.firstOrNull { !it.isSuccessful }?.let { return DeviceCall(failure = it.failure, detail = it.detail) }
+        val state =
+            EmulatorEnvironmentState(
+                requireNotNull(locale.value).normalized,
+                requireNotNull(auto.value).toIntOrNull() ?: -1,
+                requireNotNull(rotation.value).toIntOrNull() ?: -1,
+                requireNotNull(window.value).toDoubleOrNull() ?: -1.0,
+                requireNotNull(transition.value).toDoubleOrNull() ?: -1.0,
+                requireNotNull(animator.value).toDoubleOrNull() ?: -1.0,
+            )
+        return try {
+            DeviceCall(state)
+        } catch (
+            _: IllegalArgumentException,
+        ) {
+            DeviceCall(failure = DeviceFailureKind.INVALID_OUTPUT, detail = "Environment snapshot values were unsupported.")
+        }
+    }
+
+    override fun applyEnvironment(
+        serial: String,
+        contract: io.github.fredleonam.droidproof.model.EmulatorEnvironmentContractV1,
+        timeoutMillis: Long,
+    ): DeviceCall<Unit> {
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
+        // cmd locale is intentionally the only locale mutation mechanism in this narrow emulator slice.
+        val commands =
+            listOf(
+                listOf("shell", "cmd", "locale", "set", contract.locale),
+                listOf("shell", "settings", "--user", "0", "put", "system", "accelerometer_rotation", "0"),
+                listOf(
+                    "shell",
+                    "settings",
+                    "--user",
+                    "0",
+                    "put",
+                    "system",
+                    "user_rotation",
+                    if (contract.orientation == Orientation.PORTRAIT) "0" else "1",
+                ),
+                listOf(
+                    "shell",
+                    "settings",
+                    "--user",
+                    "0",
+                    "put",
+                    "global",
+                    ANIMATION_SETTINGS[0],
+                    contract.animations.windowScale.toString(),
+                ),
+                listOf(
+                    "shell",
+                    "settings",
+                    "--user",
+                    "0",
+                    "put",
+                    "global",
+                    ANIMATION_SETTINGS[1],
+                    contract.animations.transitionScale.toString(),
+                ),
+                listOf(
+                    "shell",
+                    "settings",
+                    "--user",
+                    "0",
+                    "put",
+                    "global",
+                    ANIMATION_SETTINGS[2],
+                    contract.animations.animatorScale.toString(),
+                ),
+            )
+        return mutate(serial, commands, deadline, "Requested environment mutation is unavailable on this emulator.")
+    }
+
+    override fun restoreEnvironment(
+        serial: String,
+        state: EmulatorEnvironmentState,
+        timeoutMillis: Long,
+    ): DeviceCall<Unit> {
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
+        val commands =
+            listOf(
+                listOf("shell", "cmd", "locale", "set", state.locale),
+                listOf(
+                    "shell",
+                    "settings",
+                    "--user",
+                    "0",
+                    "put",
+                    "system",
+                    "accelerometer_rotation",
+                    state.accelerometerRotation.toString(),
+                ),
+                listOf("shell", "settings", "--user", "0", "put", "system", "user_rotation", state.userRotation.toString()),
+                listOf("shell", "settings", "--user", "0", "put", "global", ANIMATION_SETTINGS[0], state.windowScale.toString()),
+                listOf("shell", "settings", "--user", "0", "put", "global", ANIMATION_SETTINGS[1], state.transitionScale.toString()),
+                listOf("shell", "settings", "--user", "0", "put", "global", ANIMATION_SETTINGS[2], state.animatorScale.toString()),
+            )
+        return mutate(serial, commands, deadline, "Environment restoration is unavailable on this emulator.")
+    }
+
+    private fun mutate(
+        serial: String,
+        commands: List<List<String>>,
+        deadline: Long,
+        detail: String,
+    ): DeviceCall<Unit> {
+        for (command in commands) {
+            val result = run(target(serial) + command, remainingMillis(deadline), SETTING_LIMIT_BYTES)
+            if (result.failure != null || result.stderr.isNotBlank()) {
+                return DeviceCall(
+                    failure =
+                        if (result.failure == null) {
+                            DeviceFailureKind.UNSUPPORTED
+                        } else {
+                            result.failureCall<DeviceCall<Unit>>(
+                                "",
+                            ).failure!!
+                        },
+                    detail = detail,
+                )
+            }
+        }
+        return DeviceCall(Unit)
+    }
+
     override fun preflight(
         serial: String,
         timeoutMillis: Long,

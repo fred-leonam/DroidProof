@@ -53,6 +53,49 @@ data class EmulatorEnvironmentObservations(
 )
 
 @Serializable
+enum class EnvironmentExecutionMode { VERIFY_ONLY, APPLY_AND_RESTORE }
+
+@Serializable
+enum class EnvironmentRestorationOutcome { NOT_REQUIRED, NOT_ATTEMPTED, RESTORED, RESTORE_MISMATCH, RESTORE_UNAVAILABLE }
+
+@Serializable
+data class EmulatorEnvironmentState(
+    val locale: String,
+    val accelerometerRotation: Int,
+    val userRotation: Int,
+    val windowScale: Double,
+    val transitionScale: Double,
+    val animatorScale: Double,
+) {
+    init {
+        require(accelerometerRotation in 0..1 && userRotation in 0..3)
+        require(listOf(windowScale, transitionScale, animatorScale).all { it.isFinite() && it >= 0.0 })
+    }
+}
+
+@Serializable
+data class EnvironmentTransactionDocument(
+    val transactionSchemaVersion: Int = 1,
+    val mode: EnvironmentExecutionMode,
+    val original: EmulatorEnvironmentState? = null,
+    val mutationAttempted: Boolean = false,
+    val requestedVerification: EnvironmentEvaluationOutcome? = null,
+    val restorationAttempted: Boolean = false,
+    val restored: EmulatorEnvironmentState? = null,
+    val restorationOutcome: EnvironmentRestorationOutcome,
+    val detail: String,
+    val limitations: List<String> =
+        listOf(
+            "Restoration is best effort and cannot survive SIGKILL, host power loss, emulator crash, or permanent ADB loss.",
+            "The serial-scoped in-process boundary does not prevent external emulator mutation.",
+        ),
+) {
+    init {
+        require(detail.isNotBlank() && detail.length <= 512)
+    }
+}
+
+@Serializable
 data class EnvironmentFieldEvaluation(
     val field: String,
     val requested: String,

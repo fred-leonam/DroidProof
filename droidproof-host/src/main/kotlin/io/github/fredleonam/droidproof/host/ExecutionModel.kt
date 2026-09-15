@@ -13,6 +13,7 @@ import java.nio.file.Path
 enum class ExecutionStage {
     PREFLIGHT,
     ENVIRONMENT,
+    ENVIRONMENT_RESTORE,
     ARTIFACT_BINDING,
     LAUNCH,
     ASSERTION,

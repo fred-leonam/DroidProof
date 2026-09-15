@@ -9,6 +9,7 @@ import io.github.fredleonam.droidproof.evidence.V3_SCHEMA_VERSION
 import io.github.fredleonam.droidproof.evidence.evidenceJson
 import io.github.fredleonam.droidproof.model.BundleRelativePath
 import io.github.fredleonam.droidproof.model.EmulatorEnvironmentEvaluationV1
+import io.github.fredleonam.droidproof.model.EnvironmentTransactionDocument
 import io.github.fredleonam.droidproof.model.EventSource
 import io.github.fredleonam.droidproof.model.EvidenceBundleManifest
 import io.github.fredleonam.droidproof.model.EvidenceBundleManifestV3
@@ -122,6 +123,7 @@ class EvidenceReportGenerator {
 
                 append(observedEnvironment(manifest.observedEnvironment))
                 append(emulatorEnvironmentSection(bundle, manifest.evidenceFiles))
+                append(environmentTransactionSection(bundle, manifest.evidenceFiles))
                 append(timelineSection(timeline, manifest.evidenceFiles, links, integrityBound = true))
                 append(networkSection(timeline, manifest.evidenceFiles, links))
                 append(screenshotSection(manifest.evidenceFiles, links))
@@ -277,7 +279,9 @@ class EvidenceReportGenerator {
         inventory: List<EvidenceFileDescriptor>,
     ): String {
         val path = BundleRelativePath("environment/evaluation.json")
-        val descriptor = inventory.singleOrNull { it.path == path && it.mediaType == "application/json" } ?: return ""
+        val descriptor =
+            inventory.singleOrNull { it.path == path && it.mediaType == "application/json" }
+                ?: return ""
         val evaluation =
             evidenceJson.decodeFromString<EmulatorEnvironmentEvaluationV1>(
                 Files.readString(bundle.resolve(descriptor.path.value), StandardCharsets.UTF_8),
@@ -304,6 +308,35 @@ class EvidenceReportGenerator {
                 appendLine("<li>${Html.escape(field.field)}: ${Html.escape(field.outcome.name)} — ${Html.escape(field.explanation)}</li>")
             }
             appendLine("</ul></section>")
+        }
+    }
+
+    private fun environmentTransactionSection(
+        bundle: Path,
+        inventory: List<EvidenceFileDescriptor>,
+    ): String {
+        val path = BundleRelativePath("environment/transaction.json")
+        val descriptor = inventory.singleOrNull { it.path == path && it.mediaType == "application/json" } ?: return ""
+        val transaction =
+            evidenceJson.decodeFromString<EnvironmentTransactionDocument>(
+                Files.readString(bundle.resolve(descriptor.path.value), StandardCharsets.UTF_8),
+            )
+
+        fun state(value: io.github.fredleonam.droidproof.model.EmulatorEnvironmentState?): String =
+            value?.let {
+                "locale=${it.locale}, accelerometer_rotation=${it.accelerometerRotation}, " +
+                    "user_rotation=${it.userRotation}, window=${it.windowScale}, " +
+                    "transition=${it.transitionScale}, animator=${it.animatorScale}"
+            } ?: "Unavailable"
+        return buildString {
+            appendLine("<section><h2>Emulator environment transaction</h2><dl class=\"summary\">")
+            append(row("Mode", transaction.mode.name))
+            append(row("Original environment", state(transaction.original)))
+            append(row("Mutation attempted", yesNo(transaction.mutationAttempted)))
+            append(row("Applied verification", transaction.requestedVerification?.name ?: "Not evaluated"))
+            append(rowHtml("Restoration status", badge(transaction.restorationOutcome.name)))
+            append(row("Restored environment", state(transaction.restored)))
+            appendLine("</dl><p>${Html.escape(transaction.detail)}</p></section>")
         }
     }
 
