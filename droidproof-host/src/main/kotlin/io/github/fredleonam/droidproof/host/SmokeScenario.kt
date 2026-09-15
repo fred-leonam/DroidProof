@@ -1,6 +1,7 @@
 package io.github.fredleonam.droidproof.host
 
 import io.github.fredleonam.droidproof.evidence.Sha256Calculator
+import io.github.fredleonam.droidproof.mockserver.ExpectedHttpRequest
 import io.github.fredleonam.droidproof.mockserver.MockServerLimits
 import io.github.fredleonam.droidproof.mockserver.MockServerPlan
 import io.github.fredleonam.droidproof.mockserver.PlannedHttpResponse
@@ -33,36 +34,19 @@ interface ScenarioDefinition {
     val expectedPackage: String
     val launchComponent: String
     val orderedSteps: List<ScenarioStep>
-    val backendPlan: ScenarioBackendPlan? get() = null
+    val backendPlan: BackendPlanDefinition? get() = null
 }
 
-@Serializable
-data class ScenarioBackendPlan(
-    val devicePort: Int,
-    val method: String,
-    val path: String,
-    val requestBodyLimitBytes: Long,
-    val responseBodyLimitBytes: Long,
-    val responsePlan: List<PlannedHttpResponse>,
-) {
-    init {
-        require(devicePort in 1024..65535) { "Device backend port must be between 1024 and 65535." }
-        require(requestBodyLimitBytes in 1..MAX_NETWORK_BODY_BYTES) { "Request-body limit is outside supported bounds." }
-        require(responseBodyLimitBytes in 1..MAX_NETWORK_BODY_BYTES) { "Response-body limit is outside supported bounds." }
-        val serverPlan = MockServerPlan(method, path, responsePlan)
-        responsePlan.forEach { response ->
-            require(response.mediaType == "application/json") { "Scenario-v3 responses must use application/json." }
-            require(runCatching { scenarioJson.parseToJsonElement(response.body) }.isSuccess) {
-                "Scenario-v3 response bodies must be valid JSON."
-            }
-            require(response.body.toByteArray(StandardCharsets.UTF_8).size.toLong() <= responseBodyLimitBytes) {
-                "Planned response body exceeds the configured response-body limit."
-            }
-        }
-        require(serverPlan.responses.size + EXTRA_EXCHANGE_ALLOWANCE <= MAX_NETWORK_EXCHANGES)
-    }
+interface BackendPlanDefinition {
+    val devicePort: Int
+    val method: String
+    val path: String
+    val requestBodyLimitBytes: Long
+    val responseBodyLimitBytes: Long
+    val responsePlan: List<PlannedHttpResponse>
+    val mockServerExpectedRequest: ExpectedHttpRequest? get() = null
 
-    fun serverPlan(): MockServerPlan = MockServerPlan(method, path, responsePlan)
+    fun serverPlan(): MockServerPlan = MockServerPlan(method, path, responsePlan, mockServerExpectedRequest)
 
     fun serverLimits(): MockServerLimits =
         MockServerLimits(
@@ -70,6 +54,55 @@ data class ScenarioBackendPlan(
             responseBodyLimitBytes,
             responsePlan.size + EXTRA_EXCHANGE_ALLOWANCE,
         )
+}
+
+@Serializable
+data class ScenarioBackendPlan(
+    override val devicePort: Int,
+    override val method: String,
+    override val path: String,
+    override val requestBodyLimitBytes: Long,
+    override val responseBodyLimitBytes: Long,
+    override val responsePlan: List<PlannedHttpResponse>,
+) : BackendPlanDefinition {
+    init {
+        validateBackendPlan(this, 3)
+    }
+}
+
+@Serializable
+data class ScenarioExpectedRequest(
+    val mediaType: String,
+    val body: String,
+) {
+    init {
+        ExpectedHttpRequest(mediaType, body)
+        require(runCatching { scenarioJson.parseToJsonElement(body) }.isSuccess) {
+            "Scenario-v4 expected request body must be valid JSON."
+        }
+    }
+
+    fun serverContract(): ExpectedHttpRequest = ExpectedHttpRequest(mediaType, body)
+}
+
+@Serializable
+data class ScenarioBackendPlanV4(
+    override val devicePort: Int,
+    override val method: String,
+    override val path: String,
+    override val requestBodyLimitBytes: Long,
+    override val responseBodyLimitBytes: Long,
+    val expectedRequest: ScenarioExpectedRequest,
+    override val responsePlan: List<PlannedHttpResponse>,
+) : BackendPlanDefinition {
+    override val mockServerExpectedRequest: ExpectedHttpRequest get() = expectedRequest.serverContract()
+
+    init {
+        validateBackendPlan(this, 4)
+        require(expectedRequest.body.toByteArray(StandardCharsets.UTF_8).size.toLong() <= requestBodyLimitBytes) {
+            "Expected request body exceeds the configured request-body limit."
+        }
+    }
 }
 
 @Serializable
@@ -161,6 +194,23 @@ data class SmokeScenarioV3(
 }
 
 @Serializable
+data class SmokeScenarioV4(
+    override val schemaVersion: Int,
+    override val scenarioId: ScenarioId,
+    override val expectedPackage: String,
+    override val launchComponent: String,
+    override val backendPlan: ScenarioBackendPlanV4,
+    val steps: List<ScenarioStep>,
+) : ScenarioDefinition {
+    override val orderedSteps: List<ScenarioStep> get() = steps
+
+    init {
+        require(schemaVersion == 4) { "Unsupported scenario schema version." }
+        validateOrderedScenario(expectedPackage, launchComponent, steps)
+    }
+}
+
+@Serializable
 data class SmokeScenario(
     override val schemaVersion: Int,
     override val scenarioId: ScenarioId,
@@ -242,10 +292,42 @@ object SmokeScenarioLoader {
                 1 -> scenarioJson.decodeFromString<SmokeScenario>(text)
                 2 -> scenarioJson.decodeFromString<SmokeScenarioV2>(text)
                 3 -> scenarioJson.decodeFromString<SmokeScenarioV3>(text)
+                4 -> scenarioJson.decodeFromString<SmokeScenarioV4>(text)
                 else -> error("Unsupported scenario schema version: $version.")
             }
         return AcceptedScenario(scenario, bytes, Sha256Calculator.calculate(ByteArrayInputStream(bytes)))
     }
+}
+
+private fun validateBackendPlan(
+    plan: BackendPlanDefinition,
+    schemaVersion: Int,
+) {
+    require(plan.devicePort in 1024..65535) { "Device backend port must be between 1024 and 65535." }
+    require(plan.requestBodyLimitBytes in 1..MAX_NETWORK_BODY_BYTES) { "Request-body limit is outside supported bounds." }
+    require(plan.responseBodyLimitBytes in 1..MAX_NETWORK_BODY_BYTES) { "Response-body limit is outside supported bounds." }
+    val serverPlan = MockServerPlan(plan.method, plan.path, plan.responsePlan, plan.mockServerExpectedRequest)
+    plan.responsePlan.forEach { response ->
+        require(response.mediaType == "application/json") { "Scenario-v$schemaVersion responses must use application/json." }
+        require(runCatching { scenarioJson.parseToJsonElement(response.body) }.isSuccess) {
+            "Scenario-v$schemaVersion response bodies must be valid JSON."
+        }
+        require(response.body.toByteArray(StandardCharsets.UTF_8).size.toLong() <= plan.responseBodyLimitBytes) {
+            "Planned response body exceeds the configured response-body limit."
+        }
+    }
+    require(serverPlan.responses.size + EXTRA_EXCHANGE_ALLOWANCE <= MAX_NETWORK_EXCHANGES)
+}
+
+private fun validateOrderedScenario(
+    expectedPackage: String,
+    launchComponent: String,
+    steps: List<ScenarioStep>,
+) {
+    validateScope(expectedPackage, launchComponent)
+    require(steps.size in 1..100) { "Scenario must contain 1 to 100 steps." }
+    require(steps.last() is AssertUiNode) { "Scenario must end with an assertion." }
+    steps.forEach { validateResource(expectedPackage, it.resourceId) }
 }
 
 private const val MAX_SCENARIO_BYTES = 1024L * 1024L

@@ -339,12 +339,20 @@ class EvidenceReportGenerator {
             }
             appendLine(
                 "<div class=\"table-scroll\"><table><thead><tr><th>Sequence</th><th>Method</th>" +
-                    "<th>Path</th><th>Response status</th><th>Verified exchange evidence</th></tr></thead><tbody>",
+                    "<th>Path</th><th>Request contract</th><th>Request bytes</th><th>Request SHA-256</th>" +
+                    "<th>Response status</th><th>Verified exchange evidence</th></tr></thead><tbody>",
             )
             exchanges.forEachIndexed { index, event ->
                 append("<tr><td>${Html.escape(event.attributes["serverSequence"] ?: (index + 1).toString())}</td>")
                 append("<td>${Html.escape(event.attributes["method"] ?: "Unavailable")}</td>")
                 append("<td>${Html.escape(event.attributes["path"] ?: "Unavailable")}</td>")
+                append("<td>${Html.escape(event.attributes["requestContractOutcome"] ?: "Unavailable")}")
+                event.attributes["requestContractIssues"]?.takeIf { it.isNotEmpty() }?.let { issues ->
+                    append("<br><span class=\"muted\">${Html.escape(issues)}</span>")
+                }
+                append("</td>")
+                append("<td>${Html.escape(event.attributes["requestBytes"] ?: "Unavailable")}</td>")
+                append("<td><code>${Html.escape(event.attributes["requestSha256"] ?: "Unavailable")}</code></td>")
                 append("<td>${Html.escape(event.attributes["responseStatus"] ?: "Unavailable")}</td><td>")
                 val references = event.evidence.filter { it.path in networkFiles }
                 if (references.isEmpty()) {

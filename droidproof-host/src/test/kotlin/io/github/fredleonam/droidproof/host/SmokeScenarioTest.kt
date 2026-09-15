@@ -100,6 +100,48 @@ class SmokeScenarioTest {
     }
 
     @Test
+    fun `v4 strictly parses a bounded expected HTTP request without changing older schemas`() {
+        val source = directory.resolve("request-contract.json")
+        Files.writeString(source, REQUEST_CONTRACT_SCENARIO)
+
+        val accepted = SmokeScenarioLoader.load(source)
+        val scenario = accepted.scenario as SmokeScenarioV4
+
+        assertEquals("application/json; charset=utf-8", scenario.backendPlan.expectedRequest.mediaType)
+        assertEquals("{\"customer\":\"DroidProof42\"}", scenario.backendPlan.expectedRequest.body)
+        assertEquals(REQUEST_CONTRACT_SCENARIO, accepted.exactBytes.toString(Charsets.UTF_8))
+
+        Files.writeString(source, VALID_SCENARIO)
+        assertEquals(1, SmokeScenarioLoader.load(source).scenario.schemaVersion)
+        Files.writeString(source, INTERACTIVE_SCENARIO)
+        assertEquals(2, SmokeScenarioLoader.load(source).scenario.schemaVersion)
+        Files.writeString(source, NETWORK_SCENARIO)
+        assertEquals(3, SmokeScenarioLoader.load(source).scenario.schemaVersion)
+    }
+
+    @Test
+    fun `v4 rejects missing malformed empty unbounded and unknown request contracts`() {
+        val withoutExpectedRequest =
+            REQUEST_CONTRACT_SCENARIO.replace(
+                "\"expectedRequest\":{\"mediaType\":\"application/json; charset=utf-8\"," +
+                    "\"body\":\"{\\\"customer\\\":\\\"DroidProof42\\\"}\"},",
+                "",
+            )
+        listOf(
+            withoutExpectedRequest,
+            REQUEST_CONTRACT_SCENARIO.replace("application/json; charset=utf-8", "application/json; charset=iso-8859-1"),
+            REQUEST_CONTRACT_SCENARIO.replace("application/json; charset=utf-8", "application/json; charset=utf-8; x=y"),
+            REQUEST_CONTRACT_SCENARIO.replace("application/json; charset=utf-8", "text/plain"),
+            REQUEST_CONTRACT_SCENARIO.replace("{\\\"customer\\\":\\\"DroidProof42\\\"}", ""),
+            REQUEST_CONTRACT_SCENARIO.replace("\"expectedRequest\":{", "\"expectedRequest\":{\"unknown\":true,"),
+            REQUEST_CONTRACT_SCENARIO.replace("\"requestBodyLimitBytes\":4096", "\"requestBodyLimitBytes\":1"),
+            REQUEST_CONTRACT_SCENARIO.replace("\"schemaVersion\":4", "\"schemaVersion\":5"),
+            NETWORK_SCENARIO.replace("\"schemaVersion\":3", "\"schemaVersion\":4"),
+            REQUEST_CONTRACT_SCENARIO.replace("\"schemaVersion\":4", "\"schemaVersion\":3"),
+        ).forEachIndexed { index, invalid -> assertRejected(invalid, "request contract invalid case $index") }
+    }
+
+    @Test
     fun `text step validates restricted language and preserves exact bytes and hash`() {
         val source = directory.resolve("text.json")
         Files.writeString(source, TEXT_SCENARIO)
@@ -155,6 +197,17 @@ internal const val NETWORK_SCENARIO =
         """"launchComponent":"io.droidproof.smoke/io.droidproof.smoke.MainActivity","backendPlan":{"devicePort":38637,""" +
         """"method":"POST","path":"/orders","requestBodyLimitBytes":4096,"responseBodyLimitBytes":4096,"responsePlan":[""" +
         """{"status":503,"body":"{\"error\":\"retry\"}"},{"status":201,"body":"{\"orderId\":\"order-42\"}"}]},""" +
+        """"steps":[{"type":"typeTextUiNode","resourceId":"io.droidproof.smoke:id/name","text":"DroidProof42"},""" +
+        """{"type":"tapUiNode","resourceId":"io.droidproof.smoke:id/action"},{"type":"assertUiNode",""" +
+        """"resourceId":"io.droidproof.smoke:id/status","text":"Order order-42 created","deadlineMillis":250,"pollIntervalMillis":100}]}"""
+
+internal const val REQUEST_CONTRACT_SCENARIO =
+    """{"schemaVersion":4,"scenarioId":"smoke-network-request","expectedPackage":"io.droidproof.smoke",""" +
+        """"launchComponent":"io.droidproof.smoke/io.droidproof.smoke.MainActivity","backendPlan":{"devicePort":38637,""" +
+        """"method":"POST","path":"/orders","requestBodyLimitBytes":4096,"responseBodyLimitBytes":4096,""" +
+        """"expectedRequest":{"mediaType":"application/json; charset=utf-8","body":"{\"customer\":\"DroidProof42\"}"},""" +
+        """"responsePlan":[{"status":503,"body":"{\"error\":\"retry\"}"},""" +
+        """{"status":201,"body":"{\"orderId\":\"order-42\"}"}]},""" +
         """"steps":[{"type":"typeTextUiNode","resourceId":"io.droidproof.smoke:id/name","text":"DroidProof42"},""" +
         """{"type":"tapUiNode","resourceId":"io.droidproof.smoke:id/action"},{"type":"assertUiNode",""" +
         """"resourceId":"io.droidproof.smoke:id/status","text":"Order order-42 created","deadlineMillis":250,"pollIntervalMillis":100}]}"""

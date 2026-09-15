@@ -71,6 +71,27 @@ class CheckedInInteractiveScenariosTest {
         assertEquals(Sha256Calculator.calculate(path), accepted.sha256)
     }
 
+    @Test
+    fun `checked-in v4 scenarios correlate UI input with passing and intentionally failing request contracts`() {
+        val passingPath = scenarioPath("network-request-passing.json")
+        val failingPath = scenarioPath("network-request-failing.json")
+        val passingAccepted = SmokeScenarioLoader.load(passingPath)
+        val failingAccepted = SmokeScenarioLoader.load(failingPath)
+        val passing = passingAccepted.scenario as SmokeScenarioV4
+        val failing = failingAccepted.scenario as SmokeScenarioV4
+
+        assertEquals("DroidProof42", (passing.steps.first() as TypeTextUiNode).text)
+        assertEquals("{\"customer\":\"DroidProof42\"}", passing.backendPlan.expectedRequest.body)
+        assertEquals("{\"customer\":\"WrongCustomer\"}", failing.backendPlan.expectedRequest.body)
+        assertEquals("application/json; charset=utf-8", passing.backendPlan.expectedRequest.mediaType)
+        assertEquals(listOf(503, 201), passing.backendPlan.responsePlan.map { it.status })
+        assertEquals(passing.steps, failing.steps)
+        assertContentEquals(Files.readAllBytes(passingPath), passingAccepted.exactBytes)
+        assertContentEquals(Files.readAllBytes(failingPath), failingAccepted.exactBytes)
+        assertEquals(Sha256Calculator.calculate(passingPath), passingAccepted.sha256)
+        assertEquals(Sha256Calculator.calculate(failingPath), failingAccepted.sha256)
+    }
+
     private fun scenarioPath(name: String): Path =
         Path.of(requireNotNull(System.getProperty("droidproof.repositoryRoot")))
             .resolve("samples/smoke-app/scenarios")

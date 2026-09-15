@@ -16,6 +16,9 @@ import io.github.fredleonam.droidproof.mockserver.MockServerLimits
 import io.github.fredleonam.droidproof.mockserver.MockServerPlan
 import io.github.fredleonam.droidproof.mockserver.MockServerStarter
 import io.github.fredleonam.droidproof.mockserver.ObservedHttpExchange
+import io.github.fredleonam.droidproof.mockserver.RequestContractEvaluation
+import io.github.fredleonam.droidproof.mockserver.RequestContractIssue
+import io.github.fredleonam.droidproof.mockserver.RequestContractOutcome
 import io.github.fredleonam.droidproof.mockserver.RunningMockServer
 import io.github.fredleonam.droidproof.model.BundleRelativePath
 import io.github.fredleonam.droidproof.model.DroidProofVersion
@@ -73,7 +76,9 @@ class NetworkExecutionTest {
 
     @Test
     fun `UI pass with a missing expected request is a completed behavioral failure`() {
-        val result = coordinator(networkDevice(true), FakeRunningServer(successfulExchanges().take(1))).run(request("missing-request"))
+        val result =
+            coordinator(networkDevice(true), FakeRunningServer(successfulRequestContractExchanges().take(1)))
+                .run(request("missing-request", REQUEST_CONTRACT_SCENARIO))
 
         assertEquals(ExecutionStatus.COMPLETED, result.document?.status)
         assertEquals(ScenarioVerdict.FAILED, result.document?.verdict)
@@ -142,6 +147,89 @@ class NetworkExecutionTest {
         assertTrue(result.bundleIntegrityValid)
     }
 
+    @Test
+    fun `v4 requires every retry request contract to match`() {
+        val matched =
+            coordinator(networkDevice(true), FakeRunningServer(successfulRequestContractExchanges()))
+                .run(request("request-contract-success", REQUEST_CONTRACT_SCENARIO))
+
+        assertTrue(matched.isSuccessful)
+        assertEquals(NetworkEvaluationOutcome.MATCHED, matched.document?.network?.outcome)
+        assertEquals(
+            listOf(RequestContractOutcome.MATCHED, RequestContractOutcome.MATCHED),
+            matched.document?.network?.exchanges?.map { it.requestContractOutcome },
+        )
+        val matchedBundle = requireNotNull(matched.output)
+        val networkFiles =
+            evidenceJson.decodeFromString<EvidenceBundleManifestV3>(Files.readString(matchedBundle.resolve("manifest.json")))
+                .evidenceFiles.filter { it.role == EvidenceFileRole.NETWORK }
+        networkFiles.forEach { descriptor ->
+            val exchangeJson = Files.readString(matchedBundle.resolve(descriptor.path.value))
+            assertTrue(exchangeJson.contains("\"outcome\": \"MATCHED\""))
+            assertTrue(!exchangeJson.contains("DroidProof42"))
+        }
+    }
+
+    @Test
+    fun `v4 UI success with second request mismatch is completed behavioral failure and valid evidence`() {
+        val exchanges = successfulRequestContractExchanges().toMutableList()
+        exchanges[1] =
+            exchanges[1].copy(
+                requestContract =
+                    RequestContractEvaluation(
+                        RequestContractOutcome.MISMATCHED,
+                        listOf(RequestContractIssue.BODY_SHA256_MISMATCH),
+                    ),
+            )
+
+        val result =
+            coordinator(networkDevice(true), FakeRunningServer(exchanges))
+                .run(request("request-contract-failure", REQUEST_CONTRACT_SCENARIO))
+
+        assertEquals(AssertionOutcome.MATCHED, result.document?.assertion?.outcome)
+        assertEquals(ExecutionStatus.COMPLETED, result.document?.status)
+        assertEquals(ScenarioVerdict.FAILED, result.document?.verdict)
+        assertEquals(NetworkEvaluationOutcome.MISMATCHED, result.document?.network?.outcome)
+        assertEquals(EvidenceCompleteness.COMPLETE, result.document?.evidenceCompleteness)
+        assertTrue(result.bundleIntegrityValid)
+        assertTrue(EvidenceBundleVerifier().verify(requireNotNull(result.output)).isValid)
+    }
+
+    @Test
+    fun `v4 unavailable request collection remains not evaluated and is not a behavioral mismatch`() {
+        val exchanges = successfulRequestContractExchanges().toMutableList()
+        exchanges[0] =
+            exchanges[0].copy(
+                requestBody = exchanges[0].requestBody.copy(complete = false),
+                requestContract =
+                    RequestContractEvaluation(
+                        RequestContractOutcome.NOT_EVALUATED,
+                        listOf(RequestContractIssue.BODY_INCOMPLETE),
+                    ),
+            )
+
+        val result =
+            coordinator(networkDevice(true), FakeRunningServer(exchanges))
+                .run(request("request-contract-unavailable", REQUEST_CONTRACT_SCENARIO))
+
+        assertEquals(NetworkEvaluationOutcome.NOT_EVALUATED, result.document?.network?.outcome)
+        assertEquals(ExecutionStatus.ERROR, result.document?.status)
+        assertEquals(ScenarioVerdict.NOT_EVALUATED, result.document?.verdict)
+        assertTrue(result.bundleIntegrityValid)
+    }
+
+    @Test
+    fun `v4 extra request remains a completed behavioral mismatch`() {
+        val exchanges = successfulRequestContractExchanges() + exchange(3, 409, RequestContractOutcome.MATCHED, matchedPlan = false)
+        val result =
+            coordinator(networkDevice(true), FakeRunningServer(exchanges))
+                .run(request("request-contract-extra", REQUEST_CONTRACT_SCENARIO))
+
+        assertEquals(ExecutionStatus.COMPLETED, result.document?.status)
+        assertEquals(ScenarioVerdict.FAILED, result.document?.verdict)
+        assertEquals(NetworkEvaluationOutcome.MISMATCHED, result.document?.network?.outcome)
+    }
+
     private fun coordinator(
         device: FakeSmokeDevice,
         handle: FakeRunningServer,
@@ -169,9 +257,12 @@ class NetworkExecutionTest {
         )
     }
 
-    private fun request(name: String): SmokeRunRequest {
+    private fun request(
+        name: String,
+        scenarioContents: String = NETWORK_SCENARIO,
+    ): SmokeRunRequest {
         val apk = directory.resolve("$name.apk").also { Files.writeString(it, "apk bytes") }
-        val scenario = directory.resolve("$name.json").also { Files.writeString(it, NETWORK_SCENARIO) }
+        val scenario = directory.resolve("$name.json").also { Files.writeString(it, scenarioContents) }
         return SmokeRunRequest(
             apk,
             scenario,
@@ -224,9 +315,17 @@ class NetworkExecutionTest {
 
     private fun successfulExchanges(): List<ObservedHttpExchange> = listOf(exchange(1, 503), exchange(2, 201))
 
+    private fun successfulRequestContractExchanges(): List<ObservedHttpExchange> =
+        listOf(
+            exchange(1, 503, RequestContractOutcome.MATCHED),
+            exchange(2, 201, RequestContractOutcome.MATCHED),
+        )
+
     private fun exchange(
         sequence: Int,
         status: Int,
+        requestContractOutcome: RequestContractOutcome = RequestContractOutcome.NOT_EVALUATED,
+        matchedPlan: Boolean = true,
     ) = ObservedHttpExchange(
         sequence,
         wallClock.instant().toString(),
@@ -235,8 +334,9 @@ class NetworkExecutionTest {
         BODY,
         status,
         responseBody(status),
-        matchedResponsePlan = true,
-        responsePlanIndex = sequence,
+        matchedResponsePlan = matchedPlan,
+        responsePlanIndex = sequence.takeIf { matchedPlan },
+        requestContract = RequestContractEvaluation(requestContractOutcome),
     )
 
     private fun responseBody(status: Int): HttpBodyObservation {
@@ -254,7 +354,13 @@ class NetworkExecutionTest {
     }
 
     private companion object {
-        val BODY = HttpBodyObservation(2, "0".repeat(64), complete = true)
+        private val EXPECTED_REQUEST_BYTES = "{\"customer\":\"DroidProof42\"}".toByteArray()
+        val BODY =
+            HttpBodyObservation(
+                EXPECTED_REQUEST_BYTES.size.toLong(),
+                Sha256Calculator.calculate(java.io.ByteArrayInputStream(EXPECTED_REQUEST_BYTES)).value,
+                complete = true,
+            )
         val INPUT_NODE =
             """<hierarchy><node package="io.droidproof.smoke" resource-id="io.droidproof.smoke:id/name" bounds="[1,1][3,3]"/></hierarchy>"""
                 .toByteArray()

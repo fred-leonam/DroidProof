@@ -132,7 +132,20 @@ class SmokeAdbClient(
         timeoutMillis: Long,
     ): DeviceCall<InstalledPackagePaths> {
         require(PACKAGE_NAME.matches(packageName)) { "Invalid package name." }
-        val result = run(target(serial) + listOf("shell", "pm", "path", "--user", "0", packageName), timeoutMillis)
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
+        val listing =
+            run(
+                target(serial) + listOf("shell", "pm", "list", "packages", "--user", "0", packageName),
+                remainingMillis(deadline),
+            )
+        if (listing.failure != null) return listing.failureCall("Could not query installed packages.")
+        val installed = listing.stdout.lineSequence().map(String::trim).filter(String::isNotEmpty).toList()
+        if (installed.isEmpty()) return DeviceCall(InstalledPackagePaths(emptyList()))
+        if (installed != listOf("package:$packageName")) {
+            return DeviceCall(failure = DeviceFailureKind.INVALID_OUTPUT, detail = "Package manager returned unexpected output.")
+        }
+        // Preflight already requires primary user 0; `pm path --user 0` is not portable across supported Android builds.
+        val result = run(target(serial) + listOf("shell", "pm", "path", packageName), remainingMillis(deadline))
         if (result.failure != null) return result.failureCall("Could not query installed APK paths.")
         val lines = result.stdout.lineSequence().map(String::trim).filter(String::isNotEmpty).toList()
         if (lines.isEmpty()) return DeviceCall(InstalledPackagePaths(emptyList()))
@@ -208,7 +221,8 @@ class SmokeAdbClient(
         validatePort(hostPort)
         val result = run(target(serial) + listOf("reverse", "tcp:$devicePort", "tcp:$hostPort"), timeoutMillis)
         if (result.failure != null) return result.failureCall("ADB reverse setup failed.")
-        if (result.stdout.isNotBlank() || result.stderr.isNotBlank()) {
+        val standardOutput = result.stdout.trim()
+        if (standardOutput !in setOf("", devicePort.toString()) || result.stderr.isNotBlank()) {
             return DeviceCall(failure = DeviceFailureKind.INVALID_OUTPUT, detail = "ADB reverse setup returned unexpected output.")
         }
         return DeviceCall(Unit)
