@@ -10,21 +10,28 @@ import io.github.fredleonam.droidproof.device.CollectionIssueCode
 import io.github.fredleonam.droidproof.device.CollectionOutcome
 import io.github.fredleonam.droidproof.device.DeviceIdentity
 import io.github.fredleonam.droidproof.device.ObservedField
+import io.github.fredleonam.droidproof.evidence.AuthenticationStatus
+import io.github.fredleonam.droidproof.evidence.BundleSigningConfiguration
 import io.github.fredleonam.droidproof.evidence.EvidenceBundleVerifier
+import io.github.fredleonam.droidproof.evidence.EvidenceBundleWriter
 import io.github.fredleonam.droidproof.evidence.Sha256Calculator
 import io.github.fredleonam.droidproof.evidence.evidenceJson
 import io.github.fredleonam.droidproof.model.BundleRelativePath
 import io.github.fredleonam.droidproof.model.DroidProofVersion
+import io.github.fredleonam.droidproof.model.EmulatorEnvironmentEvaluationV1
+import io.github.fredleonam.droidproof.model.EnvironmentEvaluationOutcome
 import io.github.fredleonam.droidproof.model.EvidenceBundleManifestV3
 import io.github.fredleonam.droidproof.model.EvidenceCompleteness
 import io.github.fredleonam.droidproof.model.EvidenceFileRole
 import io.github.fredleonam.droidproof.model.ExecutionStatus
+import io.github.fredleonam.droidproof.model.Orientation
 import io.github.fredleonam.droidproof.model.ScenarioVerdict
 import io.github.fredleonam.droidproof.model.TimelineDocument
 import kotlinx.serialization.decodeFromString
 import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Files
 import java.nio.file.Path
+import java.security.KeyPairGenerator
 import java.time.Clock
 import java.time.Instant
 import java.time.ZoneOffset
@@ -57,6 +64,173 @@ class SmokeCoordinatorTest {
         assertEquals(Sha256Calculator.calculate(bundle.resolve("scenario/scenario.json")), manifest.scenario.dataSha256)
         assertFalse(Files.exists(bundle.parent.resolve("work")))
         assertFalse(Files.exists(bundle.resolve("input.apk")))
+    }
+
+    @Test
+    fun `matching contract runs before artifact binding and publishes observed environment evidence`() {
+        val device = FakeSmokeDevice().apply { dumps += DumpResponse(FakeSmokeDevice.MATCHING_XML) }
+        val request = environmentRequest("environment-match")
+
+        val result = coordinator(device, completeCapture()).run(request)
+        val bundle = requireNotNull(result.output)
+
+        assertTrue(result.isSuccessful)
+        assertEquals(
+            listOf("preflight", "locale", "orientation", "animations", "paths"),
+            device.operations.take(5).map { it.substringBefore(':') },
+        )
+        assertContentEquals(
+            Files.readAllBytes(requireNotNull(request.environmentPath)),
+            Files.readAllBytes(bundle.resolve("environment/contract.json")),
+        )
+        val evaluation =
+            evidenceJson.decodeFromString<EmulatorEnvironmentEvaluationV1>(Files.readString(bundle.resolve("environment/evaluation.json")))
+        assertEquals(EnvironmentEvaluationOutcome.MATCHED, evaluation.outcome)
+        val manifest = evidenceJson.decodeFromString<EvidenceBundleManifestV3>(Files.readString(bundle.resolve("manifest.json")))
+        assertEquals("en-US", manifest.observedEnvironment.locale.value)
+        assertEquals("PORTRAIT", manifest.observedEnvironment.orientation.value)
+        assertEquals("window=0.0, transition=0.0, animator=0.0", manifest.observedEnvironment.animations.value)
+        assertTrue(manifest.evidenceFiles.any { it.path.value == "environment/contract.json" })
+        assertTrue(manifest.evidenceFiles.any { it.path.value == "environment/evaluation.json" })
+        val timeline = evidenceJson.decodeFromString<TimelineDocument>(Files.readString(bundle.resolve("timeline.json")))
+        assertEquals(
+            "environment/evaluation.json",
+            timeline.events.single { it.type == "execution.environment" }.evidence.single().path.value,
+        )
+    }
+
+    @Test
+    fun `locale orientation and animation mismatches are precondition errors that prevent device mutations`() {
+        val devices =
+            listOf(
+                FakeSmokeDevice().apply { localeResult = DeviceCall(DeviceLocaleObservation("pt-BR", "pt-BR")) },
+                FakeSmokeDevice().apply {
+                    orientationResult =
+                        DeviceCall(
+                            DeviceOrientationObservation(Orientation.LANDSCAPE, "accelerometerRotation=0,userRotation=1"),
+                        )
+                },
+                FakeSmokeDevice().apply { animationsResult = DeviceCall(DeviceAnimationObservations(1.0, 0.0, 0.0)) },
+            )
+        devices.forEachIndexed { index, device ->
+            val result =
+                coordinator(
+                    device,
+                    DeviceEvidenceCapture { error("capture must not run") },
+                ).run(environmentRequest("mismatch-$index"))
+            assertEquals(ExecutionStatus.ERROR, result.document?.status)
+            assertEquals(ScenarioVerdict.NOT_EVALUATED, result.document?.verdict)
+            assertEquals(EvidenceCompleteness.PARTIAL, result.document?.evidenceCompleteness)
+            assertTrue(
+                device.operations.none {
+                    it.startsWith("paths:") || it.startsWith("install:") || it.startsWith("launch:") ||
+                        it.startsWith("reverse:") || it.startsWith("dump:") || it.startsWith("tap:")
+                },
+            )
+            val bundle = requireNotNull(result.output)
+            val evaluation =
+                evidenceJson.decodeFromString<EmulatorEnvironmentEvaluationV1>(
+                    Files.readString(bundle.resolve("environment/evaluation.json")),
+                )
+            assertEquals(EnvironmentEvaluationOutcome.MISMATCHED, evaluation.outcome)
+            assertTrue(EvidenceBundleVerifier().verify(bundle).isValid)
+        }
+    }
+
+    @Test
+    fun `unavailable timeout and cancellation retain distinct environment failure semantics`() {
+        val unavailable =
+            FakeSmokeDevice().apply {
+                localeResult = DeviceCall(failure = DeviceFailureKind.INVALID_OUTPUT, detail = "private output")
+            }
+        val unavailableResult =
+            coordinator(unavailable, DeviceEvidenceCapture { error("capture must not run") })
+                .run(environmentRequest("unavailable"))
+        assertEquals(ExecutionStatus.ERROR, unavailableResult.document?.status)
+        val unavailableBundle = requireNotNull(unavailableResult.output)
+        val evaluation =
+            evidenceJson.decodeFromString<EmulatorEnvironmentEvaluationV1>(
+                Files.readString(unavailableBundle.resolve("environment/evaluation.json")),
+            )
+        assertEquals(EnvironmentEvaluationOutcome.UNAVAILABLE, evaluation.outcome)
+        assertFalse(Files.readString(unavailableBundle.resolve("environment/evaluation.json")).contains("private output"))
+
+        val timeout = FakeSmokeDevice().apply { localeResult = DeviceCall(failure = DeviceFailureKind.TIMEOUT, detail = "private timeout") }
+        val timeoutResult =
+            coordinator(
+                timeout,
+                DeviceEvidenceCapture { error("capture must not run") },
+            ).run(environmentRequest("env-timeout"))
+        assertEquals(ExecutionStatus.ERROR, timeoutResult.document?.status)
+        assertFalse(
+            Files.readString(requireNotNull(timeoutResult.output).resolve("environment/evaluation.json")).contains("private timeout"),
+        )
+
+        val cancelled =
+            FakeSmokeDevice().apply {
+                localeResult = DeviceCall(failure = DeviceFailureKind.CANCELLED, detail = "private cancel")
+            }
+        val cancelledResult =
+            coordinator(
+                cancelled,
+                DeviceEvidenceCapture { error("capture must not run") },
+            ).run(environmentRequest("env-cancel"))
+        assertEquals(ExecutionStatus.CANCELLED, cancelledResult.document?.status)
+        assertEquals(ScenarioVerdict.NOT_EVALUATED, cancelledResult.document?.verdict)
+        assertEquals(listOf("preflight", "locale"), cancelled.operations.map { it.substringBefore(':') })
+        val cancelledManifest =
+            evidenceJson.decodeFromString<EvidenceBundleManifestV3>(
+                Files.readString(requireNotNull(cancelledResult.output).resolve("manifest.json")),
+            )
+        assertTrue(cancelledManifest.observedEnvironment.locale.unavailableReason!!.contains("did not complete"))
+    }
+
+    @Test
+    fun `legacy execution does not observe environment and retains unavailable manifest semantics`() {
+        val device = FakeSmokeDevice().apply { dumps += DumpResponse(FakeSmokeDevice.MATCHING_XML) }
+        val result = coordinator(device, completeCapture()).run(request("legacy-environment"))
+        val manifest =
+            evidenceJson.decodeFromString<EvidenceBundleManifestV3>(
+                Files.readString(requireNotNull(result.output).resolve("manifest.json")),
+            )
+
+        assertTrue(device.operations.none { it.startsWith("locale:") || it.startsWith("orientation:") || it.startsWith("animations:") })
+        assertTrue(manifest.observedEnvironment.locale.unavailableReason!!.contains("no environment contract"))
+        assertEquals(StageStatus.SKIPPED, result.document?.stages?.single { it.stage == ExecutionStage.ENVIRONMENT }?.status)
+    }
+
+    @Test
+    fun `tampering with environment evaluation is detected`() {
+        val device = FakeSmokeDevice().apply { dumps += DumpResponse(FakeSmokeDevice.MATCHING_XML) }
+        val bundle = requireNotNull(coordinator(device, completeCapture()).run(environmentRequest("environment-tamper")).output)
+        Files.writeString(bundle.resolve("environment/evaluation.json"), "{}\n")
+        assertFalse(EvidenceBundleVerifier().verify(bundle).isValid)
+    }
+
+    @Test
+    fun `signed bundle transitively authenticates environment evidence through manifest inventory`() {
+        val keys = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
+        val device = FakeSmokeDevice().apply { dumps += DumpResponse(FakeSmokeDevice.MATCHING_XML) }
+        val coordinator =
+            SmokeCoordinator(
+                device,
+                completeCapture(),
+                publisher =
+                    BundlePublisher { request, destination ->
+                        EvidenceBundleWriter().write(request, destination, signing = BundleSigningConfiguration(keys.private, keys.public))
+                    },
+                wallClock = wallClock,
+                monotonicClock = FakeMonotonicClock(),
+                cancellation = CancellationSignal { false },
+                assertionRunner = assertionRunner(device, FakeMonotonicClock()),
+                idSource = { "signed-environment" },
+            )
+        val bundle = requireNotNull(coordinator.run(environmentRequest("signed-environment")).output)
+
+        val verification = EvidenceBundleVerifier().verify(bundle, keys.public)
+        assertTrue(verification.isValid)
+        assertEquals(AuthenticationStatus.AUTHENTICATED, verification.authentication.status)
+        assertTrue(Files.exists(bundle.resolve("environment/evaluation.json")))
     }
 
     @Test
@@ -353,6 +527,7 @@ class SmokeCoordinatorTest {
         assertEquals(
             listOf(
                 "execution.preflight",
+                "execution.environment",
                 "execution.artifact_binding",
                 "execution.launch",
                 "scenario.step.tap",
@@ -639,6 +814,27 @@ class SmokeCoordinatorTest {
         droidProofVersion = DroidProofVersion("0.1.0-SNAPSHOT"),
         commandTimeoutMillis = 1000,
     )
+
+    private fun environmentRequest(name: String): SmokeRunRequest =
+        request(name).copy(
+            environmentPath =
+                directory.resolve("$name-environment.json").also {
+                    Files.writeString(
+                        it,
+                        environmentContractJson(),
+                    )
+                },
+        )
+
+    private fun environmentContractJson(): String =
+        """
+        {
+          "schemaVersion": 1,
+          "locale": "en-US",
+          "orientation": "PORTRAIT",
+          "animations": {"windowScale": 0.0, "transitionScale": 0.0, "animatorScale": 0.0}
+        }
+        """.trimIndent()
 
     private fun apk(name: String): Path = directory.resolve("$name.apk").also { Files.writeString(it, "apk bytes") }
 

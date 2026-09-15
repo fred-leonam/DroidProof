@@ -12,6 +12,7 @@ import java.nio.file.Path
 @Serializable
 enum class ExecutionStage {
     PREFLIGHT,
+    ENVIRONMENT,
     ARTIFACT_BINDING,
     LAUNCH,
     ASSERTION,

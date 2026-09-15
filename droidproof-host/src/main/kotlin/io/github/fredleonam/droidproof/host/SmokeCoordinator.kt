@@ -19,6 +19,9 @@ import io.github.fredleonam.droidproof.model.ArtifactBindingSummary
 import io.github.fredleonam.droidproof.model.BundleId
 import io.github.fredleonam.droidproof.model.BundleRelativePath
 import io.github.fredleonam.droidproof.model.DroidProofVersion
+import io.github.fredleonam.droidproof.model.EmulatorEnvironmentEvaluationV1
+import io.github.fredleonam.droidproof.model.EnvironmentEvaluationOutcome
+import io.github.fredleonam.droidproof.model.EnvironmentObservation
 import io.github.fredleonam.droidproof.model.EventId
 import io.github.fredleonam.droidproof.model.EventSource
 import io.github.fredleonam.droidproof.model.EvidenceBundleManifestV3
@@ -49,6 +52,7 @@ data class SmokeRunRequest(
     val scenarioPath: Path,
     val deviceSerial: String,
     val outputRoot: Path,
+    val environmentPath: Path? = null,
     val replaceExisting: Boolean = false,
     val droidProofVersion: DroidProofVersion,
     val commandTimeoutMillis: Long = 15_000,
@@ -97,7 +101,8 @@ class SmokeCoordinator(
             ensureActive()
             val scenario = SmokeScenarioLoader.load(request.scenarioPath)
             val artifact = ArtifactBinder(device, wallClock).snapshot(request.apkPath, workDirectory)
-            accepted = AcceptedInputs(scenario, artifact)
+            val environment = request.environmentPath?.let(EnvironmentContractLoader::load)
+            accepted = AcceptedInputs(scenario, artifact, environment)
             val overallBudget =
                 scenario.scenario.orderedSteps.filterIsInstance<AssertUiNode>().sumOf { it.deadlineMillis } +
                     scenario.scenario.orderedSteps.sumOf { it.stepType.deviceOperationCount } * request.commandTimeoutMillis +
@@ -109,6 +114,34 @@ class SmokeCoordinator(
             if (!preflight.isSuccessful) abort(preflight.detail ?: "Device preflight failed.", preflight.failure)
         }
         val inputs = accepted
+
+        var environmentEvaluation: EmulatorEnvironmentEvaluationV1? = null
+        if (inputs?.environment != null && state.canUseDevice()) {
+            stage<Unit>(state, ExecutionStage.ENVIRONMENT) {
+                ensureActive()
+                val locale = device.observeLocale(request.deviceSerial, operationTimeout(request, state))
+                if (locale.failure == DeviceFailureKind.CANCELLED) abort("Environment observation was cancelled.", locale.failure)
+                ensureActive()
+                val orientation = device.observeOrientation(request.deviceSerial, operationTimeout(request, state))
+                if (orientation.failure == DeviceFailureKind.CANCELLED) abort("Environment observation was cancelled.", orientation.failure)
+                ensureActive()
+                val animations = device.observeAnimations(request.deviceSerial, operationTimeout(request, state))
+                if (animations.failure == DeviceFailureKind.CANCELLED) abort("Environment observation was cancelled.", animations.failure)
+                environmentEvaluation =
+                    EnvironmentEvaluator.evaluate(inputs.environment.contract, locale, orientation, animations)
+                if (environmentEvaluation?.outcome != EnvironmentEvaluationOutcome.MATCHED) {
+                    throw RunAbort(requireNotNull(environmentEvaluation).explanation)
+                }
+            }
+        } else {
+            val detail =
+                if (inputs?.environment == null && inputs != null) {
+                    "No environment contract was requested."
+                } else {
+                    "A prior fatal stage prevented environment observation."
+                }
+            state.skip(ExecutionStage.ENVIRONMENT, detail)
+        }
 
         var bindingAttempt: BindingAttempt? = null
         var bindingState: ArtifactBindingState? = null
@@ -286,6 +319,7 @@ class SmokeCoordinator(
                 networkEvaluation,
                 networkFiles,
                 networkEvents,
+                environmentEvaluation,
                 state,
             )
         deleteWorkDirectory(workDirectory)
@@ -471,6 +505,7 @@ class SmokeCoordinator(
         networkEvaluation: NetworkEvaluationDocument?,
         networkFiles: List<EvidenceFileInput>,
         networkEvents: List<TimelineEvent>,
+        environmentEvaluation: EmulatorEnvironmentEvaluationV1?,
         state: MutableExecutionState,
     ): SmokeRunResult {
         val finalizationStarted = wallClock.instant().toString()
@@ -480,9 +515,11 @@ class SmokeCoordinator(
             bindingState?.afterCapture?.sha256 != null &&
                 bindingState.afterCapture.sha256 == accepted.artifact.sha256
         val evaluated = assertionAttempt?.document?.outcome in setOf(AssertionOutcome.MATCHED, AssertionOutcome.NOT_MATCHED)
+        val environmentComplete =
+            accepted.environment == null || environmentEvaluation?.outcome == EnvironmentEvaluationOutcome.MATCHED
         val completeness =
             if (
-                evaluated && hierarchy != null && screenshot != null && finalBindingMatches &&
+                evaluated && hierarchy != null && screenshot != null && finalBindingMatches && environmentComplete &&
                 networkEvaluation?.outcome != NetworkEvaluationOutcome.NOT_EVALUATED
             ) {
                 EvidenceCompleteness.COMPLETE
@@ -543,12 +580,13 @@ class SmokeCoordinator(
                     state.stepFiles,
                     networkFiles,
                     captureResult,
+                    environmentEvaluation,
                 )
             val manifest =
-                manifest(request, executionId, accepted, binding, bindingState, captureResult, resultDocument)
+                manifest(request, executionId, accepted, binding, bindingState, captureResult, environmentEvaluation, resultDocument)
             val bundle = runDirectory.resolve("bundle")
             publisher.publish(
-                EvidenceBundleRequestV3(manifest, timeline(resultDocument, networkEvents), sources),
+                EvidenceBundleRequestV3(manifest, timeline(resultDocument, networkEvents, environmentEvaluation), sources),
                 bundle,
             )
             val verification = verifier.verify(bundle)
@@ -582,6 +620,7 @@ class SmokeCoordinator(
         stepFiles: List<EvidenceFileInput>,
         networkFiles: List<EvidenceFileInput>,
         captureResult: CaptureResult?,
+        environmentEvaluation: EmulatorEnvironmentEvaluationV1?,
     ): List<EvidenceFileInput> {
         val documents = Files.createDirectories(workDirectory.resolve("documents"))
         val scenario = documents.resolve("scenario.json").also { Files.write(it, accepted.scenario.exactBytes) }
@@ -595,6 +634,14 @@ class SmokeCoordinator(
             )
         files += stepFiles
         files += networkFiles
+        accepted.environment?.let { environment ->
+            val contract = documents.resolve("environment-contract.json").also { Files.write(it, environment.exactBytes) }
+            files += EvidenceFileInput(contract, ENVIRONMENT_CONTRACT_PATH, "application/json", EvidenceFileRole.ATTACHMENT)
+            environmentEvaluation?.let { evaluation ->
+                val evaluationFile = documents.resolve("environment-evaluation.json").also { writeJson(it, evaluation) }
+                files += EvidenceFileInput(evaluationFile, ENVIRONMENT_EVALUATION_PATH, "application/json", EvidenceFileRole.TEST_RESULT)
+            }
+        }
         captureResult?.let { captured ->
             files +=
                 EvidenceFileInput(
@@ -617,6 +664,7 @@ class SmokeCoordinator(
         binding: ArtifactBindingDocument,
         bindingState: ArtifactBindingState?,
         captureResult: CaptureResult?,
+        environmentEvaluation: EmulatorEnvironmentEvaluationV1?,
         result: ExecutionResultDocument,
     ): EvidenceBundleManifestV3 {
         val bindingStatus =
@@ -637,6 +685,19 @@ class SmokeCoordinator(
             }
         }
         val hierarchyPath = result.assertion.hierarchyPath
+        val contractRequested = accepted.environment != null
+        val localeAbsentReason =
+            if (contractRequested) {
+                "Locale was not observed because environment evaluation did not complete."
+            } else {
+                "Locale was not observed because no environment contract was requested."
+            }
+        val orientationAbsentReason =
+            if (contractRequested) {
+                "Orientation was not observed because environment evaluation did not complete."
+            } else {
+                "Orientation was not observed because no environment contract was requested."
+            }
         return EvidenceBundleManifestV3(
             schemaVersion = V3_SCHEMA_VERSION,
             bundleId = BundleId("${accepted.scenario.scenario.scenarioId.value}-$executionId"),
@@ -663,9 +724,9 @@ class SmokeCoordinator(
                 ObservedExecutionEnvironment(
                     observed("buildFingerprint"),
                     observed("apiLevel"),
-                    ObservedValue(unavailableReason = "Locale was not observed or controlled by this milestone."),
-                    ObservedValue(unavailableReason = "Orientation was not observed or controlled by this milestone."),
-                    ObservedValue(unavailableReason = "Animation scales were not observed or controlled by this milestone."),
+                    manifestObservation(environmentEvaluation?.observed?.locale, localeAbsentReason),
+                    manifestObservation(environmentEvaluation?.observed?.orientation, orientationAbsentReason),
+                    manifestAnimations(environmentEvaluation, contractRequested),
                     ObservedValue(unavailableReason = "No random seed was requested or observed."),
                     ObservedValue(unavailableReason = "The application clock was not controlled or observed."),
                 ),
@@ -684,11 +745,16 @@ class SmokeCoordinator(
     private fun timeline(
         result: ExecutionResultDocument,
         networkEvents: List<TimelineEvent>,
+        environmentEvaluation: EmulatorEnvironmentEvaluationV1?,
     ): List<TimelineEvent> =
         result.stages.flatMapIndexed { stageIndex, stage ->
             val stageNumber = (stageIndex + 1).toString().padStart(3, '0')
             val evidence =
                 when (stage.stage) {
+                    ExecutionStage.ENVIRONMENT ->
+                        environmentEvaluation?.let {
+                            listOf(EvidenceReference(ENVIRONMENT_EVALUATION_PATH, "application/json"))
+                        }.orEmpty()
                     ExecutionStage.ASSERTION ->
                         result.assertion.hierarchyPath?.let {
                             listOf(
@@ -729,6 +795,43 @@ class SmokeCoordinator(
                     evidence = evidence,
                 )
         } + networkEvents
+
+    private fun manifestObservation(
+        observation: EnvironmentObservation?,
+        absentReason: String,
+    ): ObservedValue {
+        val value = observation?.normalizedValue
+        return if (value != null) {
+            ObservedValue(value = value)
+        } else {
+            ObservedValue(unavailableReason = observation?.unavailableReason ?: absentReason)
+        }
+    }
+
+    private fun manifestAnimations(
+        evaluation: EmulatorEnvironmentEvaluationV1?,
+        contractRequested: Boolean,
+    ): ObservedValue {
+        val animations =
+            evaluation?.observed?.animations
+                ?: return ObservedValue(
+                    unavailableReason =
+                        if (contractRequested) {
+                            "Animation scales were not observed because environment evaluation did not complete."
+                        } else {
+                            "Animation scales were not observed because no environment contract was requested."
+                        },
+                )
+        val values = listOf(animations.windowScale, animations.transitionScale, animations.animatorScale)
+        if (values.any { it.normalizedValue == null }) {
+            return ObservedValue(unavailableReason = "One or more required animation-scale observations were unavailable.")
+        }
+        return ObservedValue(
+            value =
+                "window=${animations.windowScale.normalizedValue}, " +
+                    "transition=${animations.transitionScale.normalizedValue}, animator=${animations.animatorScale.normalizedValue}",
+        )
+    }
 
     private fun operationTimeout(
         request: SmokeRunRequest,
@@ -823,6 +926,7 @@ class SmokeCoordinator(
     private data class AcceptedInputs(
         val scenario: AcceptedScenario,
         val artifact: StagedArtifact,
+        val environment: AcceptedEnvironmentContract?,
     )
 
     private class RunAbort(
@@ -859,9 +963,12 @@ class SmokeCoordinator(
             wasCancelled: Boolean = false,
         ) = recordFailure(detail, wasCancelled)
 
-        fun skip(stage: ExecutionStage) {
+        fun skip(
+            stage: ExecutionStage,
+            detail: String = "A prior fatal stage prevented device actions.",
+        ) {
             val timestamp = now()
-            stages += StageOutcome(stage, StageStatus.SKIPPED, timestamp, timestamp, "A prior fatal stage prevented device actions.")
+            stages += StageOutcome(stage, StageStatus.SKIPPED, timestamp, timestamp, detail)
         }
     }
 
@@ -873,6 +980,8 @@ class SmokeCoordinator(
         val SCENARIO_PATH = BundleRelativePath("scenario/scenario.json")
         val RESULT_PATH = BundleRelativePath("execution/result.json")
         val BINDING_PATH = BundleRelativePath("execution/artifact-binding.json")
+        val ENVIRONMENT_CONTRACT_PATH = BundleRelativePath("environment/contract.json")
+        val ENVIRONMENT_EVALUATION_PATH = BundleRelativePath("environment/evaluation.json")
         val HIERARCHY_PATH = BundleRelativePath("ui/hierarchy.xml")
         val CAPTURE_PATH = BundleRelativePath("capture/capture.json")
         val SCREENSHOT_PATH = BundleRelativePath("screenshots/display.png")

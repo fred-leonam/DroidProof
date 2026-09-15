@@ -6,6 +6,7 @@ import io.github.fredleonam.droidproof.device.CommandResult
 import io.github.fredleonam.droidproof.device.CommandRunner
 import io.github.fredleonam.droidproof.device.DeviceSelector
 import io.github.fredleonam.droidproof.device.ProcessCommandRunner
+import io.github.fredleonam.droidproof.model.Orientation
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
@@ -15,6 +16,7 @@ enum class DeviceFailureKind {
     COMMAND,
     DISCONNECTED,
     CANCELLED,
+    TIMEOUT,
     INVALID_OUTPUT,
     UNSUPPORTED,
 }
@@ -29,11 +31,36 @@ data class DeviceCall<T>(
 
 data class InstalledPackagePaths(val paths: List<String>)
 
+data class DeviceLocaleObservation(val normalized: String, val rawSafe: String)
+
+data class DeviceOrientationObservation(val orientation: Orientation, val rawSafe: String)
+
+data class DeviceAnimationObservations(
+    val windowScale: Double,
+    val transitionScale: Double,
+    val animatorScale: Double,
+)
+
 interface SmokeDeviceOperations {
     fun preflight(
         serial: String,
         timeoutMillis: Long,
     ): DeviceCall<Unit>
+
+    fun observeLocale(
+        serial: String,
+        timeoutMillis: Long,
+    ): DeviceCall<DeviceLocaleObservation>
+
+    fun observeOrientation(
+        serial: String,
+        timeoutMillis: Long,
+    ): DeviceCall<DeviceOrientationObservation>
+
+    fun observeAnimations(
+        serial: String,
+        timeoutMillis: Long,
+    ): DeviceCall<DeviceAnimationObservations>
 
     fun packagePaths(
         serial: String,
@@ -124,6 +151,78 @@ class SmokeAdbClient(
             return DeviceCall(failure = DeviceFailureKind.UNSUPPORTED, detail = "uiautomator dump is unavailable.")
         }
         return DeviceCall(Unit)
+    }
+
+    override fun observeLocale(
+        serial: String,
+        timeoutMillis: Long,
+    ): DeviceCall<DeviceLocaleObservation> {
+        val result = run(target(serial) + listOf("shell", "getprop", "persist.sys.locale"), timeoutMillis, SETTING_LIMIT_BYTES)
+        if (result.failure != null) return result.failureCall("Device locale observation was unavailable.")
+        if (result.stderr.isNotBlank()) return invalidObservation("Device locale output was unsupported.")
+        val raw = singleSafeLine(result.stdout) ?: return invalidObservation("Device locale output was unsupported.")
+        val normalized = canonicalLocale(raw) ?: return invalidObservation("Device locale output was unsupported.")
+        return DeviceCall(DeviceLocaleObservation(normalized, raw))
+    }
+
+    override fun observeOrientation(
+        serial: String,
+        timeoutMillis: Long,
+    ): DeviceCall<DeviceOrientationObservation> {
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
+        val automatic =
+            run(
+                target(serial) + listOf("shell", "settings", "--user", "0", "get", "system", "accelerometer_rotation"),
+                remainingMillis(deadline),
+                SETTING_LIMIT_BYTES,
+            )
+        if (automatic.failure != null) return automatic.failureCall("Device orientation observation was unavailable.")
+        val auto = singleSettingValue(automatic) ?: return invalidObservation("Device orientation output was unsupported.")
+        if (auto != "0") {
+            return DeviceCall(
+                failure = DeviceFailureKind.UNSUPPORTED,
+                detail = "Auto-rotation must be disabled to verify configured orientation.",
+            )
+        }
+        val configured =
+            run(
+                target(serial) + listOf("shell", "settings", "--user", "0", "get", "system", "user_rotation"),
+                remainingMillis(deadline),
+                SETTING_LIMIT_BYTES,
+            )
+        if (configured.failure != null) return configured.failureCall("Device orientation observation was unavailable.")
+        val rotation = singleSettingValue(configured) ?: return invalidObservation("Device orientation output was unsupported.")
+        val orientation =
+            when (rotation) {
+                "0", "2" -> Orientation.PORTRAIT
+                "1", "3" -> Orientation.LANDSCAPE
+                else -> return invalidObservation("Device orientation output was unsupported.")
+            }
+        return DeviceCall(DeviceOrientationObservation(orientation, "accelerometerRotation=0,userRotation=$rotation"))
+    }
+
+    override fun observeAnimations(
+        serial: String,
+        timeoutMillis: Long,
+    ): DeviceCall<DeviceAnimationObservations> {
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
+        val values = mutableListOf<Double>()
+        for (setting in ANIMATION_SETTINGS) {
+            val result =
+                run(
+                    target(serial) + listOf("shell", "settings", "get", "global", setting),
+                    remainingMillis(deadline),
+                    SETTING_LIMIT_BYTES,
+                )
+            if (result.failure != null) return result.failureCall("Animation-scale observation was unavailable.")
+            val raw = singleSettingValue(result) ?: return invalidObservation("Animation-scale output was unsupported.")
+            val value = raw.toDoubleOrNull()
+            if (value == null || !value.isFinite() || value < 0.0) {
+                return invalidObservation("Animation-scale output was unsupported.")
+            }
+            values += value
+        }
+        return DeviceCall(DeviceAnimationObservations(values[0], values[1], values[2]))
     }
 
     override fun packagePaths(
@@ -353,11 +452,35 @@ private fun <T> CommandResult.failureCall(detail: String): DeviceCall<T> =
         failure =
             when {
                 failure == CommandFailure.INTERRUPTED -> DeviceFailureKind.CANCELLED
+                failure == CommandFailure.TIMEOUT -> DeviceFailureKind.TIMEOUT
                 "offline" in stderr || "not found" in stderr || "disconnected" in stderr -> DeviceFailureKind.DISCONNECTED
                 else -> DeviceFailureKind.COMMAND
             },
         detail = detail,
     )
+
+private fun <T> invalidObservation(detail: String): DeviceCall<T> = DeviceCall(failure = DeviceFailureKind.INVALID_OUTPUT, detail = detail)
+
+private fun singleSettingValue(result: CommandResult): String? = if (result.stderr.isBlank()) singleSafeLine(result.stdout) else null
+
+private fun singleSafeLine(output: String): String? {
+    if (output.toByteArray(Charsets.UTF_8).size > SETTING_LIMIT_BYTES) return null
+    val lines = output.lineSequence().map(String::trim).filter(String::isNotEmpty).toList()
+    return lines.singleOrNull()?.takeIf { line ->
+        line.length <= 128 && line.all { it.code in 0x21..0x7e }
+    }
+}
+
+private fun canonicalLocale(value: String): String? {
+    if (value == "null") return null
+    val locale =
+        try {
+            java.util.Locale.Builder().setLanguageTag(value.replace('_', '-')).build()
+        } catch (_: java.util.IllformedLocaleException) {
+            return null
+        }
+    return locale.toLanguageTag().takeIf { locale.language.isNotBlank() && locale.language != "und" }
+}
 
 private fun validRemoteApkPath(path: String): Boolean =
     path.length in 2..4096 &&
@@ -369,6 +492,8 @@ private fun validRemoteApkPath(path: String): Boolean =
         path.split('/').none { it == "." || it == ".." }
 
 private const val TEXT_LIMIT_BYTES = 65_536L
+private const val SETTING_LIMIT_BYTES = 1024L
+private val ANIMATION_SETTINGS = listOf("window_animation_scale", "transition_animation_scale", "animator_duration_scale")
 private val SERIAL = Regex("[A-Za-z0-9][A-Za-z0-9._:\\[\\]-]{0,255}")
 private val PACKAGE_NAME = Regex("[a-zA-Z][a-zA-Z0-9_]*(?:\\.[a-zA-Z][a-zA-Z0-9_]*)+")
 private val COMPONENT = Regex("[a-zA-Z][a-zA-Z0-9_.]*/[a-zA-Z][a-zA-Z0-9_.]*")

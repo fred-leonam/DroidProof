@@ -17,6 +17,69 @@ class SmokeAdbClientTest {
     lateinit var directory: Path
 
     @Test
+    fun `environment observations use serial scoped bounded argument lists and parse supported values`() {
+        val requests = mutableListOf<CommandRequest>()
+        val client =
+            SmokeAdbClient(
+                Path.of("/fake/adb with spaces"),
+                CommandRunner { request ->
+                    requests += request
+                    val key = request.arguments.last()
+                    CommandResult(
+                        stdout =
+                            when (key) {
+                                "persist.sys.locale" -> "en-US\n"
+                                "accelerometer_rotation" -> "0\n"
+                                "user_rotation" -> "3\n"
+                                "window_animation_scale" -> "0\n"
+                                "transition_animation_scale" -> "0.5\n"
+                                "animator_duration_scale" -> "1.0\n"
+                                else -> error("unexpected command")
+                            },
+                    )
+                },
+            )
+
+        assertEquals("en-US", client.observeLocale("emulator-5554", 123).value?.normalized)
+        assertEquals(
+            io.github.fredleonam.droidproof.model.Orientation.LANDSCAPE,
+            client.observeOrientation("emulator-5554", 123).value?.orientation,
+        )
+        assertEquals(DeviceAnimationObservations(0.0, 0.5, 1.0), client.observeAnimations("emulator-5554", 123).value)
+        assertTrue(requests.all { it.arguments.take(3) == listOf("/fake/adb with spaces", "-s", "emulator-5554") })
+        assertTrue(requests.all { it.stdoutLimitBytes == 1024L && it.stderrLimitBytes == 65_536L })
+        assertEquals(
+            listOf("window_animation_scale", "transition_animation_scale", "animator_duration_scale"),
+            requests.takeLast(3).map { it.arguments.last() },
+        )
+    }
+
+    @Test
+    fun `environment observations reject auto rotation malformed private and unexpected output without leaking it`() {
+        val outputs =
+            listOf(
+                CommandResult(stdout = "1\n") to DeviceFailureKind.UNSUPPORTED,
+                CommandResult(stdout = "private value\n") to DeviceFailureKind.INVALID_OUTPUT,
+                CommandResult(stderr = "private stderr") to DeviceFailureKind.INVALID_OUTPUT,
+                CommandResult(stdout = "NaN\n") to DeviceFailureKind.INVALID_OUTPUT,
+            )
+        val auto = SmokeAdbClient(Path.of("/fake/adb"), CommandRunner { outputs[0].first }).observeOrientation("emulator-5554", 100)
+        assertEquals(outputs[0].second, auto.failure)
+        for ((response, expected) in outputs.drop(1)) {
+            val result = SmokeAdbClient(Path.of("/fake/adb"), CommandRunner { response }).observeAnimations("emulator-5554", 100)
+            assertEquals(expected, result.failure)
+            assertFalse(result.detail.orEmpty().contains("private"))
+        }
+        val missing =
+            SmokeAdbClient(Path.of("/fake/adb"), CommandRunner { CommandResult(stdout = "null\n") })
+                .observeLocale("emulator-5554", 100)
+        assertEquals(DeviceFailureKind.INVALID_OUTPUT, missing.failure)
+        assertFailsWith<IllegalArgumentException> {
+            SmokeAdbClient(Path.of("/fake/adb"), CommandRunner { CommandResult() }).observeLocale("bad;serial", 100)
+        }
+    }
+
+    @Test
     fun `preflight requires selected emulator primary user and scopes every device command`() {
         val requests = mutableListOf<CommandRequest>()
         val runner =

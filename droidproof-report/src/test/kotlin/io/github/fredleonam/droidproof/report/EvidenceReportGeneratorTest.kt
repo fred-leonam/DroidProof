@@ -183,6 +183,30 @@ class EvidenceReportGeneratorTest {
     }
 
     @Test
+    fun `verified environment evaluation renders requested and observed values while tampering fails closed`() {
+        val bundle = writeV3Bundle("environment-report", includeEnvironment = true)
+        val report = directory.resolve("environment-report.html")
+
+        generator.generate(bundle, report)
+        assertContainsAll(
+            report.readText(),
+            "Emulator environment",
+            "Overall evaluation",
+            "MATCHED",
+            "Requested locale</dt><dd>en-US",
+            "Observed locale</dt><dd>en-US",
+            "Requested orientation</dt><dd>PORTRAIT",
+            "Observed window animation scale</dt><dd>0.0",
+        )
+
+        bundle.resolve("environment/evaluation.json").writeText("{}\n")
+        val diagnostic = directory.resolve("environment-tampered.html")
+        generator.generate(bundle, diagnostic)
+        assertContainsAll(diagnostic.readText(), "Bundle verification failed", "SHA256_MISMATCH")
+        assertFalse(diagnostic.readText().contains("Emulator environment"))
+    }
+
+    @Test
     fun `verified request contract mismatch is explained without rendering body bytes`() {
         val bundle =
             writeV3Bundle(
@@ -380,6 +404,7 @@ class EvidenceReportGeneratorTest {
         requestContractOutcome: String = "MATCHED",
         requestContractIssues: String = "",
         signing: KeyPair? = null,
+        includeEnvironment: Boolean = false,
     ): Path {
         val result = source("$name-result.json", "{}\n")
         val binding = source("$name-binding.json", "{}\n")
@@ -388,6 +413,25 @@ class EvidenceReportGeneratorTest {
         val screenshot = directory.resolve("$name-screenshot.png").also { it.writeBytes(ONE_PIXEL_PNG) }
         val attachment = source("$name-attachment.txt", "attachment\n")
         val network = source("$name-network.json", "{\"sequence\":1}\n")
+        val environment =
+            source(
+                "$name-environment.json",
+                """{"evaluationSchemaVersion":1,"requested":{"schemaVersion":1,"locale":"en-US","orientation":"PORTRAIT","animations":{"windowScale":0.0,"transitionScale":0.0,"animatorScale":0.0}},"observed":{"locale":{"normalizedValue":"en-US","rawSafeValue":"en-US"},"orientation":{"normalizedValue":"PORTRAIT","rawSafeValue":"accelerometerRotation=0,userRotation=0"},"animations":{"windowScale":{"normalizedValue":"0.0","rawSafeValue":"0.0"},"transitionScale":{"normalizedValue":"0.0","rawSafeValue":"0.0"},"animatorScale":{"normalizedValue":"0.0","rawSafeValue":"0.0"}}},"fields":[{"field":"locale","requested":"en-US","observed":"en-US","outcome":"MATCHED","explanation":"locale matched."},{"field":"orientation","requested":"PORTRAIT","observed":"PORTRAIT","outcome":"MATCHED","explanation":"orientation matched."},{"field":"animations.windowScale","requested":"0.0","observed":"0.0","outcome":"MATCHED","explanation":"animations.windowScale matched."},{"field":"animations.transitionScale","requested":"0.0","observed":"0.0","outcome":"MATCHED","explanation":"animations.transitionScale matched."},{"field":"animations.animatorScale","requested":"0.0","observed":"0.0","outcome":"MATCHED","explanation":"animations.animatorScale matched."}],"outcome":"MATCHED","explanation":"All requested emulator environment fields matched validated observations."}
+                """,
+            )
+        val environmentFiles =
+            if (includeEnvironment) {
+                listOf(
+                    EvidenceFileInput(
+                        environment,
+                        BundleRelativePath("environment/evaluation.json"),
+                        "application/json",
+                        EvidenceFileRole.TEST_RESULT,
+                    ),
+                )
+            } else {
+                emptyList()
+            }
         val digest = Sha256("a".repeat(64))
         val packageName = if (hostile) "io.example.<script>&\"'" else "io.example.report"
         val reason =
@@ -518,7 +562,7 @@ class EvidenceReportGeneratorTest {
                             "application/json",
                             EvidenceFileRole.NETWORK,
                         ),
-                    ),
+                    ) + environmentFiles,
                 ),
                 bundle,
                 signing = signing?.let { BundleSigningConfiguration(it.private, it.public) },

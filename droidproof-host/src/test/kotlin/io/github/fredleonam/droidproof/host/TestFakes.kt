@@ -1,5 +1,6 @@
 package io.github.fredleonam.droidproof.host
 
+import io.github.fredleonam.droidproof.model.Orientation
 import java.nio.file.Files
 import java.nio.file.Path
 
@@ -13,6 +14,9 @@ internal open class FakeSmokeDevice : SmokeDeviceOperations {
     val operations = mutableListOf<String>()
     var installedBytes: List<ByteArray> = emptyList()
     var preflightResult: DeviceCall<Unit> = DeviceCall(Unit)
+    var localeResult = DeviceCall(DeviceLocaleObservation("en-US", "en-US"))
+    var orientationResult = DeviceCall(DeviceOrientationObservation(Orientation.PORTRAIT, "accelerometerRotation=0,userRotation=0"))
+    var animationsResult = DeviceCall(DeviceAnimationObservations(0.0, 0.0, 0.0))
     var installResult: DeviceCall<Unit> = DeviceCall(Unit)
     var launchResult: DeviceCall<Unit> = DeviceCall(Unit)
     var reverseResult: DeviceCall<Unit> = DeviceCall(Unit)
@@ -28,6 +32,33 @@ internal open class FakeSmokeDevice : SmokeDeviceOperations {
     ): DeviceCall<Unit> {
         operations += "preflight:$serial"
         return preflightResult
+    }
+
+    override fun observeLocale(
+        serial: String,
+        timeoutMillis: Long,
+    ): DeviceCall<DeviceLocaleObservation> {
+        operations += "locale:$serial"
+        afterOperation("locale")
+        return localeResult
+    }
+
+    override fun observeOrientation(
+        serial: String,
+        timeoutMillis: Long,
+    ): DeviceCall<DeviceOrientationObservation> {
+        operations += "orientation:$serial"
+        afterOperation("orientation")
+        return orientationResult
+    }
+
+    override fun observeAnimations(
+        serial: String,
+        timeoutMillis: Long,
+    ): DeviceCall<DeviceAnimationObservations> {
+        operations += "animations:$serial"
+        afterOperation("animations")
+        return animationsResult
     }
 
     override fun packagePaths(

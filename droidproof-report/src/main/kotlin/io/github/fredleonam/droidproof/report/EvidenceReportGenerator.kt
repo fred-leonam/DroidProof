@@ -8,6 +8,7 @@ import io.github.fredleonam.droidproof.evidence.TIMELINE_FILE
 import io.github.fredleonam.droidproof.evidence.V3_SCHEMA_VERSION
 import io.github.fredleonam.droidproof.evidence.evidenceJson
 import io.github.fredleonam.droidproof.model.BundleRelativePath
+import io.github.fredleonam.droidproof.model.EmulatorEnvironmentEvaluationV1
 import io.github.fredleonam.droidproof.model.EventSource
 import io.github.fredleonam.droidproof.model.EvidenceBundleManifest
 import io.github.fredleonam.droidproof.model.EvidenceBundleManifestV3
@@ -65,6 +66,7 @@ class EvidenceReportGenerator {
             )
         return if (verification.schemaVersion == V3_SCHEMA_VERSION) {
             renderV3(
+                bundle,
                 evidenceJson.decodeFromString<EvidenceBundleManifestV3>(manifestText),
                 timeline,
                 verification,
@@ -81,6 +83,7 @@ class EvidenceReportGenerator {
     }
 
     private fun renderV3(
+        bundle: Path,
         manifest: EvidenceBundleManifestV3,
         timeline: TimelineDocument,
         verification: EvidenceBundleVerificationResult,
@@ -118,6 +121,7 @@ class EvidenceReportGenerator {
                 appendLine("</dl></section>")
 
                 append(observedEnvironment(manifest.observedEnvironment))
+                append(emulatorEnvironmentSection(bundle, manifest.evidenceFiles))
                 append(timelineSection(timeline, manifest.evidenceFiles, links, integrityBound = true))
                 append(networkSection(timeline, manifest.evidenceFiles, links))
                 append(screenshotSection(manifest.evidenceFiles, links))
@@ -267,6 +271,41 @@ class EvidenceReportGenerator {
             append(observedRow("Controlled clock", environment.controlledClock))
             appendLine("</dl></section>")
         }
+
+    private fun emulatorEnvironmentSection(
+        bundle: Path,
+        inventory: List<EvidenceFileDescriptor>,
+    ): String {
+        val path = BundleRelativePath("environment/evaluation.json")
+        val descriptor = inventory.singleOrNull { it.path == path && it.mediaType == "application/json" } ?: return ""
+        val evaluation =
+            evidenceJson.decodeFromString<EmulatorEnvironmentEvaluationV1>(
+                Files.readString(bundle.resolve(descriptor.path.value), StandardCharsets.UTF_8),
+            )
+
+        fun observed(value: io.github.fredleonam.droidproof.model.EnvironmentObservation): String =
+            value.normalizedValue ?: "Unavailable: ${requireNotNull(value.unavailableReason)}"
+        return buildString {
+            appendLine("<section><h2>Emulator environment</h2><dl class=\"summary\">")
+            append(rowHtml("Overall evaluation", badge(evaluation.outcome.name)))
+            append(row("Requested locale", evaluation.requested.locale))
+            append(row("Observed locale", observed(evaluation.observed.locale)))
+            append(row("Requested orientation", evaluation.requested.orientation.name))
+            append(row("Observed orientation", observed(evaluation.observed.orientation)))
+            append(row("Requested window animation scale", evaluation.requested.animations.windowScale.toString()))
+            append(row("Observed window animation scale", observed(evaluation.observed.animations.windowScale)))
+            append(row("Requested transition animation scale", evaluation.requested.animations.transitionScale.toString()))
+            append(row("Observed transition animation scale", observed(evaluation.observed.animations.transitionScale)))
+            append(row("Requested animator animation scale", evaluation.requested.animations.animatorScale.toString()))
+            append(row("Observed animator animation scale", observed(evaluation.observed.animations.animatorScale)))
+            appendLine("</dl><p>${Html.escape(evaluation.explanation)}</p>")
+            appendLine("<ul class=\"issues\">")
+            evaluation.fields.forEach { field ->
+                appendLine("<li>${Html.escape(field.field)}: ${Html.escape(field.outcome.name)} — ${Html.escape(field.explanation)}</li>")
+            }
+            appendLine("</ul></section>")
+        }
+    }
 
     private fun observedRow(
         label: String,

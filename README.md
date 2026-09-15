@@ -2,18 +2,18 @@
 
 **Artifact-bound, evidence-oriented verification for Android applications.**
 
-DroidProof is an early Kotlin/JVM prototype. Its current vertical slice installs an exact APK on an explicitly selected emulator, enters a known UI value, runs the sample application's real HTTP retry against a controlled local backend, verifies the server-observed request contract, captures UI and network observations, publishes an integrity-bound and optionally Ed25519-authenticated evidence bundle, verifies it, and renders an offline HTML report.
+DroidProof is an early Kotlin/JVM prototype. Its current vertical slice verifies an explicitly supplied locale/orientation/animation contract against an already-selected emulator, installs an exact APK only after that precondition matches, enters a known UI value, runs the sample application's real HTTP retry against a controlled local backend, captures UI and network observations, publishes an integrity-bound and optionally Ed25519-authenticated evidence bundle, verifies it, and renders an offline HTML report.
 
-The APIs and schemas are not a stable release.
+The APIs and schemas are not yet a stable release.
 
 ## Current implementation
 
-- `droidproof-model` owns validated evidence identities, portable bundle paths, evidence descriptors, schema-v1/v2 legacy manifests, the schema-v3 execution manifest, and canonical timeline events.
+- `droidproof-model` owns validated evidence identities, portable bundle paths, evidence descriptors, schema-v1/v2 legacy manifests, the schema-v3 execution manifest, strict environment contract/evaluation models, and canonical timeline events.
 - `droidproof-evidence` transactionally writes bundles, streams SHA-256 and byte-size inventory data, and verifies schemas v1, v2, and v3 with structured issues. It can optionally sign the exact completed manifest/timeline core with JDK 17 Ed25519 and separately reports integrity and authentication against a caller-supplied public key. Its synthetic sample remains unsigned and receives the authoritative Gradle project version.
 - `droidproof-device` provides bounded ADB process execution and explicit screenshot, allowlisted metadata, and opt-in PID-filtered logcat collection.
 - `droidproof-mock-server` is a small Android-independent JDK HTTP server. It binds only to `127.0.0.1`, uses an ephemeral host port, serves the narrow deterministic `POST /orders` response plan, performs bounded exact-byte request-contract evaluation, records safe exchange metadata, and exposes explicit start/inspect/stop lifecycle methods.
-- `droidproof-host` performs preflight, exact APK byte binding, optional mock-server and serial-scoped ADB reverse setup, activity launch, ordered UI steps, screenshot capture, final APK identity checking, response-sequence and request-contract evaluation, cleanup, optional signing at publication, and verification. Signing keys stay outside Android execution and evidence documents.
-- `droidproof-report` verifies a bundle before rendering a deterministic static HTML report. It distinguishes unsigned, signed-without-external-trust, authenticated, and authentication-failure states. Valid network bundles show safe request-contract outcomes, issue codes, request size/SHA-256 metadata, response status, and links to verified exchange files. Integrity or explicitly requested authentication failures get only a limited diagnostic report.
+- `droidproof-host` performs preflight, optional verify-only environment evaluation, exact APK byte binding, optional mock-server and serial-scoped ADB reverse setup, activity launch, ordered UI steps, screenshot capture, final APK identity checking, response-sequence and request-contract evaluation, cleanup, optional signing at publication, and verification. It never changes emulator environment settings. Signing keys stay outside Android execution and evidence documents.
+- `droidproof-report` verifies a bundle before rendering a deterministic static HTML report. It distinguishes unsigned, signed-without-external-trust, authenticated, and authentication-failure states. Verified environment bundles show requested and observed locale, orientation, and animation scales. Integrity or explicitly requested authentication failures get only a limited diagnostic report.
 - `samples/smoke-app` preserves the v1/v2 greeting flow and adds a separate real HTTP order action. That action performs network I/O off the main thread, retries exactly once after HTTP 503, accepts the deterministic HTTP 201 JSON order ID, and displays `Order order-42 created`. Its single-task launch resets the demo UI between consecutive scenario runs.
 
 Build and test all JVM modules with JDK 17:
@@ -26,7 +26,7 @@ This root verification does not require an Android SDK, ADB executable, emulator
 
 ## Versioned contracts
 
-Scenario schema versions and evidence schema versions are separate contracts.
+Scenario, emulator-environment, evidence, and authentication schema versions are separate contracts.
 
 - Scenario v1 retains its single exact UI assertion.
 - Scenario v2 retains the ordered `typeTextUiNode`, `tapUiNode`, and `assertUiNode` actions. Existing checked-in v1/v2 scenarios remain valid and keep their behavior.
@@ -35,10 +35,12 @@ Scenario schema versions and evidence schema versions are separate contracts.
 - Evidence schema v1 remains readable with a `FILE_INTEGRITY_UNAVAILABLE` warning.
 - Evidence schema v2 retains its integrity-bound file inventory and synthetic writer.
 - Evidence schema v3 remains the execution-bundle format. Network evidence and authentication do not reinterpret or bump it: `EvidenceFileRole.NETWORK`, `EventSource.MOCK_SERVER`, inventory bindings, and timeline evidence references express network observations, while optional authentication uses the separate strict `authenticity.json` authentication schema v1.
+- Environment-contract schema v1 is a separate strict document containing a canonical BCP-47 locale, `PORTRAIT` or `LANDSCAPE`, and finite non-negative window, transition, and animator animation scales. It is not part of scenario schemas v1–v4.
+- Environment-evaluation schema v1 records validated observations, per-field outcomes, an overall `MATCHED`, `MISMATCHED`, or `UNAVAILABLE` outcome, safe explanations, and the actual observation limitations.
 
 `authenticity.json` is a reserved core file rather than ordinary inventoried evidence. It records Ed25519, the SHA-256-derived key ID of the X.509/SPKI public key, exact byte sizes and SHA-256 values for `manifest.json` and `timeline.json`, and a Base64 signature over a deterministic domain-separated message. The bundle does not contain a public key. Trust is established only when the caller supplies a public key from outside the bundle.
 
-Unknown scenario and evidence fields fail parsing. Scenario documents are bounded to 1 MiB and preserved byte-for-byte with their SHA-256. UI selectors remain package-qualified; input text remains restricted to 1–128 non-secret ASCII identifier characters. The v4 expected body must fit the configured request bound and be valid JSON, but matching is deliberately byte-exact rather than semantic JSON equivalence.
+Unknown scenario, environment-contract, evaluation, and evidence fields fail parsing. Environment contracts must be regular non-symbolic-link UTF-8 files of at most 64 KiB; their exact bytes and SHA-256 are preserved. Scenario documents are bounded to 1 MiB and preserved byte-for-byte with their SHA-256. UI selectors remain package-qualified; input text remains restricted to 1–128 non-secret ASCII identifier characters.
 
 V4 accepts `application/json` with either no parameters or exactly one unquoted `charset=utf-8` parameter. Type, subtype, parameter name, and UTF-8 token are case-normalized; optional separator whitespace is normalized. Parameter presence remains significant, so `application/json` does not match `application/json; charset=utf-8`. Other parameters, charsets, quoted values, control characters, and malformed values are rejected.
 
@@ -92,13 +94,16 @@ ANDROID_HOME=/absolute/path/to/Android/Sdk \
   -Pdroidproof.sample.keyAlias=droidproof-smoke
 ```
 
-Confirm the emulator serial, then run the checked-in passing scenario-v4 demonstration. The APK and scenario properties must be absolute paths; `$PWD` provides those when the command is run from the repository root:
+Confirm the exact authorized emulator serial and verify that it already has the requested settings; DroidProof will not apply or restore them. Then run the checked-in passing scenario-v4 demonstration with the checked-in environment contract. Input properties must be absolute paths; `$PWD` provides those when the command is run from the repository root:
 
 ```bash
+export DROIDPROOF_EMULATOR_SERIAL='<confirmed-authorized-emulator-serial>'
+
 ./gradlew :droidproof-host:runSmokeScenario \
   -Pdroidproof.apkPath="$PWD/samples/smoke-app/build/outputs/apk/release/DroidProofSmokeApp-release.apk" \
   -Pdroidproof.scenarioPath="$PWD/samples/smoke-app/scenarios/network-request-passing.json" \
-  -Pdroidproof.deviceSerial=emulator-5554 \
+  -Pdroidproof.environmentPath="$PWD/samples/smoke-app/environments/verify-only-en-us-portrait.json" \
+  -Pdroidproof.deviceSerial="$DROIDPROOF_EMULATOR_SERIAL" \
   -Pdroidproof.adbPath=/absolute/path/to/Android/Sdk/platform-tools/adb \
   -Pdroidproof.replaceExisting=true
 ```
@@ -121,7 +126,8 @@ Then add both signing properties to `runSmokeScenario` (both or neither are requ
 ./gradlew :droidproof-host:runSmokeScenario \
   -Pdroidproof.apkPath="$PWD/samples/smoke-app/build/outputs/apk/release/DroidProofSmokeApp-release.apk" \
   -Pdroidproof.scenarioPath="$PWD/samples/smoke-app/scenarios/network-request-passing.json" \
-  -Pdroidproof.deviceSerial=emulator-5554 \
+  -Pdroidproof.environmentPath="$PWD/samples/smoke-app/environments/verify-only-en-us-portrait.json" \
+  -Pdroidproof.deviceSerial="$DROIDPROOF_EMULATOR_SERIAL" \
   -Pdroidproof.adbPath=/absolute/path/to/Android/Sdk/platform-tools/adb \
   -Pdroidproof.signingPrivateKeyPath="$DROIDPROOF_KEY_DIR/private-key.pem" \
   -Pdroidproof.signingPublicKeyPath="$DROIDPROOF_KEY_DIR/public-key.pem"
@@ -131,10 +137,10 @@ Do not place or commit the private key in this repository. The key paths and pri
 
 The scenario explicitly repeats the non-secret literal `DroidProof42` in the `typeTextUiNode` step and the expected body `{"customer":"DroidProof42"}`. There is no variable interpolation or dynamic UI-to-request binding. During execution DroidProof:
 
-1. starts `droidproof-mock-server` on an ephemeral `127.0.0.1` host port;
-2. creates `adb -s <serial> reverse tcp:38637 tcp:<host-port>`;
-3. receives the application's first real `POST /orders` bytes, verifies its media type and exact bounded body contract, and returns HTTP 503;
-4. receives the retry, verifies the same request contract again, and returns HTTP 201 with `{"orderId":"order-42"}`;
+1. verifies `persist.sys.locale`, locked user-0 orientation, and the three global animation scales without writing settings;
+2. binds or installs the exact APK only after the environment matches;
+3. starts `droidproof-mock-server` on an ephemeral `127.0.0.1` host port and creates the serial-scoped reverse mapping;
+4. observes and verifies the two real `POST /orders` request contracts and ordered 503/201 response plan;
 5. asserts the final UI text `Order order-42 created` and evaluates the ordered server exchange sequence;
 6. removes only the owned reverse mapping and stops the owned server; and
 7. publishes and verifies the evidence bundle.
@@ -152,6 +158,9 @@ bundle/
 ├── execution/
 │   ├── artifact-binding.json
 │   └── result.json
+├── environment/
+│   ├── contract.json
+│   └── evaluation.json
 ├── ui/steps/
 │   ├── 001-input-before.xml
 │   ├── 002-tap-before.xml
@@ -165,7 +174,7 @@ bundle/
 
 Each network exchange document comes from the actual controlled server observation and contains a host observation timestamp, server sequence, bounded method/path, bounded request and response body metadata, response status, response-plan match metadata, and a request-contract outcome of `MATCHED`, `MISMATCHED`, or `NOT_EVALUATED`. Deterministic issue codes distinguish wrong method/path/media type, body size/hash differences, incomplete reads, and limit excess. Request and response bodies are not copied into exchange documents; the configured expected request and responses remain in the exact scenario evidence. Every network file is inventoried with role `network`, byte size, and SHA-256, and every server event links to its file from the canonical timeline.
 
-Success requires completed execution, matched UI assertion, two matched request contracts, matched ordered response plan and exchange count, matching APK bytes before and after, complete required evidence, and successful bundle verification. A complete request mismatch is a behavioral failure: execution remains `COMPLETED`, the verdict is `FAILED`, and the integrity-valid bundle is retained. Unavailable/incomplete request collection, other infrastructure failure, or cancellation yields `NOT_EVALUATED`, rather than a fabricated request match or mismatch.
+Success with an environment contract requires a successful `ENVIRONMENT` stage, matched UI assertion, two matched request contracts, matched response plan/count, matching APK bytes before and after, complete evidence, and successful bundle verification. Environment mismatch or unavailable required observation is a precondition error: execution is `ERROR`, verdict is `NOT_EVALUATED`, later install/launch/UI/network work does not run, and a truthful integrity-valid partial bundle is retained when possible. Cancellation remains `CANCELLED`; incomplete evaluation is recorded as such, and an environment mismatch is never a behavioral `FAILED` verdict. Runs without `droidproof.environmentPath` retain their previous behavior and unavailable environment fields.
 
 Run the intentional v4 failure with the same APK and `network-request-failing.json`. It keeps the UI input and application behavior unchanged but expects `{"customer":"WrongCustomer"}`. The app still reaches `Order order-42 created`; both observed requests are reported as mismatches, the execution is `COMPLETED`, the scenario verdict is `FAILED`, and the Gradle task exits nonzero because the success criteria were deliberately not met:
 
@@ -173,7 +182,8 @@ Run the intentional v4 failure with the same APK and `network-request-failing.js
 ./gradlew :droidproof-host:runSmokeScenario \
   -Pdroidproof.apkPath="$PWD/samples/smoke-app/build/outputs/apk/release/DroidProofSmokeApp-release.apk" \
   -Pdroidproof.scenarioPath="$PWD/samples/smoke-app/scenarios/network-request-failing.json" \
-  -Pdroidproof.deviceSerial=emulator-5554 \
+  -Pdroidproof.environmentPath="$PWD/samples/smoke-app/environments/verify-only-en-us-portrait.json" \
+  -Pdroidproof.deviceSerial="$DROIDPROOF_EMULATOR_SERIAL" \
   -Pdroidproof.adbPath=/absolute/path/to/Android/Sdk/platform-tools/adb
 ```
 
@@ -192,7 +202,7 @@ Generate a report from a preserved bundle, using paths outside that bundle:
   -Pdroidproof.reportPath=/absolute/path/to/report.html
 ```
 
-The default output is `droidproof-report/build/reports/droidproof/evidence-report.html`. The report has inline CSS, no JavaScript, and no external resources. It shows verified execution, artifact, environment, timeline, screenshot, inventory, and network metadata. V4 exchange rows show request-contract outcome and issue codes, observed request byte size and SHA-256, and response status. Network bodies are not injected into HTML; exchange rows link to verified local evidence files. If any registered network or other evidence is missing or tampered, verification fails and the report omits all unverified artifact, scenario, timeline, network, and preview content.
+The default output is `droidproof-report/build/reports/droidproof/evidence-report.html`. The report has inline CSS, no JavaScript, and no external resources. Its “Emulator environment” section reads only verified, inventoried `environment/evaluation.json` and shows requested/observed locale, orientation, scales, and outcome. Network bodies and raw device output are not injected into HTML. If any registered evidence is missing or tampered, verification fails and the report omits all unverified environment, artifact, scenario, timeline, network, and preview content.
 
 Without an external key, the report says either that the bundle is unsigned or that a signature is present but authenticity was not established. Verify a signed bundle against the externally obtained public key and render its authenticated status with:
 
@@ -214,11 +224,13 @@ The HTML is a derived view and is not itself evidence. See [ADR 0007](docs/adr/0
 - The observed request body is read once and retained only internally while matching. Exchange evidence stores completeness, captured size, SHA-256, outcome, and issue codes—not the body. The expected body remains in scenario evidence and must use non-secret test data; hashes and sizes are identifying metadata, not anonymization.
 - DroidProof proves what its controlled mock server observed. It does not prove that no other network traffic occurred. It is not a packet capture or TLS interception.
 - Host, Android, and server wall clocks are not treated as a shared causal clock. The controlled server's sequence establishes order only among its own exchanges.
+- Environment verification is limited to `persist.sys.locale`, locked user-0 `user_rotation` with `accelerometer_rotation=0`, and three global animation-scale settings. Auto-rotation, missing/malformed settings, unsupported Android output, and non-finite or negative scales are unavailable rather than guessed. These sequential point observations do not prove stability, effective application locale, physical posture, or full emulator determinism.
+- DroidProof does not change or restore locale, rotation, animations, or any other emulator state, and does not provision or manage emulator lifecycle. Random seed and controlled clock remain explicitly unavailable; a cancelled incomplete environment evaluation is not presented as an unrequested contract.
 - Evidence hashes establish consistency with the manifest, not authenticity. For a signed bundle, successful integrity verification plus Ed25519 verification against an externally trusted public key authenticates the exact manifest/timeline core and transitively the manifest inventory. An unsigned bundle, or a signed bundle checked without an external trust key, makes no producer-authentication claim.
 - Bundle authentication establishes limited provenance from possession of the corresponding private key. It is not non-repudiation, trusted timestamping, certificate validation, key ownership discovery, revocation, transparency logging, remote attestation, or proof that the recorded observations are true. Compromised signing keys and external trusted-key distribution remain operator concerns.
 - Screenshots, UI hierarchy, scenario values, logcat, request metadata, response plans, and network evidence can contain sensitive test data. Keep bundles local or access-controlled; do not automatically upload them as public CI artifacts.
 
-See [ADR 0008](docs/adr/0008-deterministic-network-evidence.md), [ADR 0009](docs/adr/0009-request-contract-verification.md), and [ADR 0010](docs/adr/0010-authenticated-evidence-bundles.md) for the network, authentication, and proof boundaries.
+See [ADR 0008](docs/adr/0008-deterministic-network-evidence.md), [ADR 0009](docs/adr/0009-request-contract-verification.md), [ADR 0010](docs/adr/0010-authenticated-evidence-bundles.md), and [ADR 0011](docs/adr/0011-emulator-environment-contract.md) for the proof boundaries.
 
 ## Component status and remaining limitations
 
@@ -228,18 +240,22 @@ See [ADR 0008](docs/adr/0008-deterministic-network-evidence.md), [ADR 0009](docs
 | Ed25519 bundle signing and external-key authentication | Implemented with authentication envelope v1 and JDK 17 |
 | Read-only device capture | Implemented narrow ADB slice |
 | Artifact-bound host smoke execution | Implemented for one APK, one selected emulator, and primary user 0 |
+| Verify-only emulator environment contract | Implemented v1 for locale, locked orientation, and three animation scales |
+| Environment evidence and verified report section | Implemented with strict evaluation schema v1, inventory, and timeline binding |
 | Ordered View-based UI text/tap/assert | Implemented narrow resource-ID/exact-text slice |
 | Deterministic loopback mock server and ADB reverse | Implemented for `POST /orders` ordered responses |
 | Exact HTTP request-contract verification | Implemented for one v4 JSON body/media type on `POST /orders` |
 | Real network exchange evidence and report section | Implemented with request contract outcome, issues, size, and SHA-256 |
 | Emulator lifecycle management | Not implemented |
+| Automatic environment mutation and restoration | Not implemented |
+| Full deterministic emulator provisioning | Not implemented |
 | Arbitrary traffic interception or TLS MITM | Not implemented |
 | General endpoint scripting or generalized fault injection | Not implemented |
 | Compose semantics, Espresso, or application probes | Not implemented |
 | Published Gradle plugin, general CLI, or general-purpose scenario DSL | Not implemented |
 | PKI, certificate chains, revocation, timestamping, transparency, KMS/HSM, or remote attestation | Not implemented |
 
-The next recommended milestone is a narrow, explicitly recorded emulator-environment contract for locale, orientation, and animation settings, while preserving the current evidence and authentication formats.
+The next recommended milestone is transactional application and restoration of this same narrow environment contract on an explicitly owned test emulator, with interruption-safe rollback and evidence of before/applied/restored state. That capability is not implemented here.
 
 ## Architecture decisions
 
@@ -253,3 +269,4 @@ The next recommended milestone is a narrow, explicitly recorded emulator-environ
 - [ADR 0008](docs/adr/0008-deterministic-network-evidence.md): deterministic mock-server network evidence
 - [ADR 0009](docs/adr/0009-request-contract-verification.md): bounded HTTP request-contract verification
 - [ADR 0010](docs/adr/0010-authenticated-evidence-bundles.md): optional Ed25519 authentication with an external trust root
+- [ADR 0011](docs/adr/0011-emulator-environment-contract.md): verify-only locale, orientation, and animation precondition

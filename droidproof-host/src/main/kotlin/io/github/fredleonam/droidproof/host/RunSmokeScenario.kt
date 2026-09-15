@@ -10,7 +10,7 @@ import io.github.fredleonam.droidproof.model.DroidProofVersion
 import java.nio.file.Path
 
 fun main(args: Array<String>) {
-    require(args.size == 9) { "Expected smoke-scenario task configuration arguments." }
+    require(args.size == 10) { "Expected smoke-scenario task configuration arguments." }
     require(args[1].isNotBlank()) { "Set -Pdroidproof.apkPath to one local APK." }
     require(args[2].isNotBlank()) { "Set -Pdroidproof.scenarioPath to one local scenario JSON document." }
     require(args[3].isNotBlank()) { "Set -Pdroidproof.deviceSerial to an authorized test emulator serial." }
@@ -47,8 +47,9 @@ fun main(args: Array<String>) {
                 scenarioPath = Path.of(args[2]),
                 deviceSerial = args[3],
                 outputRoot = Path.of(args[0]),
+                environmentPath = args[8].takeIf(String::isNotBlank)?.let(Path::of),
                 replaceExisting = replaceExisting,
-                droidProofVersion = DroidProofVersion(args[8]),
+                droidProofVersion = DroidProofVersion(args[9]),
             ),
         )
     val location = result.output ?: result.diagnostic
