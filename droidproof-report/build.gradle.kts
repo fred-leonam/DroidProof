@@ -40,5 +40,8 @@ tasks.register<JavaExec>("generateEvidenceReport") {
         providers.gradleProperty("droidproof.reportPath").orElse(
             layout.buildDirectory.file("reports/droidproof/evidence-report.html").map { it.asFile.absolutePath },
         )
-    argumentProviders.add(CommandLineArgumentProvider { listOf(bundlePath.get(), reportPath.get()) })
+    val trustedPublicKeyPath = providers.gradleProperty("droidproof.trustedPublicKeyPath").orElse("")
+    argumentProviders.add(
+        CommandLineArgumentProvider { listOf(bundlePath.get(), reportPath.get(), trustedPublicKeyPath.get()) },
+    )
 }

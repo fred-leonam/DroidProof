@@ -49,6 +49,8 @@ tasks.register<JavaExec>("runSmokeScenario") {
         "deviceSerial" to "",
         "adbPath" to "",
         "replaceExisting" to "false",
+        "signingPrivateKeyPath" to "",
+        "signingPublicKeyPath" to "",
     )) {
         args(providers.gradleProperty("droidproof.$name").orElse(default).get())
     }

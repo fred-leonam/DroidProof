@@ -1,5 +1,6 @@
 package io.github.fredleonam.droidproof.report
 
+import io.github.fredleonam.droidproof.evidence.AuthenticationStatus
 import io.github.fredleonam.droidproof.evidence.EvidenceBundleVerificationResult
 import io.github.fredleonam.droidproof.evidence.EvidenceBundleVerifier
 import io.github.fredleonam.droidproof.evidence.MANIFEST_FILE
@@ -23,6 +24,7 @@ import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.security.PublicKey
 
 data class EvidenceReportResult(
     val output: Path,
@@ -34,14 +36,15 @@ class EvidenceReportGenerator {
     fun generate(
         bundlePath: Path,
         reportPath: Path,
+        trustedPublicKey: PublicKey? = null,
     ): EvidenceReportResult {
-        val verification = EvidenceBundleVerifier().verify(bundlePath)
+        val verification = EvidenceBundleVerifier().verify(bundlePath, trustedPublicKey)
         val bundle = bundlePath.toAbsolutePath().normalize()
         val output = reportPath.toAbsolutePath().normalize()
         requireOutputOutsideBundle(bundle, output)
 
         val html =
-            if (verification.isValid) {
+            if (verification.isValid && verification.authentication.status != AuthenticationStatus.INVALID) {
                 renderVerified(bundle, output, verification)
             } else {
                 renderVerificationFailure(verification)
@@ -204,11 +207,25 @@ class EvidenceReportGenerator {
     ): String =
         buildString {
             val kind = if (passed) "success" else "error"
-            val heading = if (passed) "Bundle verification passed" else "Bundle verification failed"
+            val heading = if (passed) "Bundle integrity verification passed" else "Bundle verification failed"
             appendLine("<section class=\"notice $kind\"><h1>${Html.escape(heading)}</h1>")
             appendLine("<dl class=\"summary\">")
-            append(row("Verification status", if (passed) "PASSED" else "FAILED"))
+            append(row("Integrity verification", if (verification.isValid) "PASSED" else "FAILED"))
             append(row("Schema version", verification.schemaVersion?.toString() ?: "Unavailable"))
+            when (verification.authentication.status) {
+                AuthenticationStatus.UNSIGNED -> append(row("Authentication", "Bundle is unsigned"))
+                AuthenticationStatus.SIGNED_UNTRUSTED -> {
+                    append(row("Authentication", "Signature present; authenticity was not established"))
+                    verification.authentication.algorithm?.let { append(row("Signature algorithm", it)) }
+                    verification.authentication.keyId?.let { append(row("Claimed key ID", it.value)) }
+                }
+                AuthenticationStatus.AUTHENTICATED -> {
+                    append(row("Authentication", "AUTHENTICATED with externally supplied public key"))
+                    verification.authentication.algorithm?.let { append(row("Signature algorithm", it)) }
+                    verification.authentication.keyId?.let { append(row("Trusted key ID", it.value)) }
+                }
+                AuthenticationStatus.INVALID -> append(row("Authentication", "FAILED"))
+            }
             appendLine("</dl>")
             if (verification.issues.isEmpty()) {
                 appendLine("<p>No verification warnings.</p>")
@@ -223,9 +240,18 @@ class EvidenceReportGenerator {
                 }
                 appendLine("</ul>")
             }
+            if (verification.authentication.issues.isNotEmpty()) {
+                appendLine("<h2>Authentication issues</h2><ul class=\"issues\">")
+                verification.authentication.issues.forEach { issue ->
+                    append("<li><code>${Html.escape(issue.code.name)}</code>: ${Html.escape(issue.message)}")
+                    issue.path?.let { append(" <span class=\"path\">(${Html.escape(it)})</span>") }
+                    appendLine("</li>")
+                }
+                appendLine("</ul>")
+            }
             appendLine(
                 "<p><strong>Integrity scope:</strong> verification applies to the underlying evidence bundle, not this " +
-                    "disposable HTML report. SHA-256 consistency does not authenticate the evidence producer.</p></section>",
+                    "disposable HTML report. SHA-256 consistency alone does not establish producer authenticity.</p></section>",
             )
         }
 

@@ -33,6 +33,7 @@ class EvidenceModelTest {
         assertFailsWith<IllegalArgumentException> { BundleRelativePath("network//request.json") }
         assertFailsWith<IllegalArgumentException> { BundleRelativePath("C:/evidence.txt") }
         assertFailsWith<IllegalArgumentException> { BundleRelativePath("manifest.json") }
+        assertFailsWith<IllegalArgumentException> { BundleRelativePath("authenticity.json") }
     }
 
     @Test

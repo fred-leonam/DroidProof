@@ -15,9 +15,13 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.IOException
 import java.io.UncheckedIOException
+import java.nio.ByteBuffer
+import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.security.PublicKey
+import java.util.Base64
 import java.util.Locale
 
 enum class VerificationSeverity {
@@ -57,6 +61,7 @@ data class VerificationIssue(
 data class EvidenceBundleVerificationResult(
     val schemaVersion: Int?,
     val issues: List<VerificationIssue>,
+    val authentication: BundleAuthenticationResult = BundleAuthenticationResult(AuthenticationStatus.UNSIGNED),
 ) {
     val errors: List<VerificationIssue> get() = issues.filter { it.severity == VerificationSeverity.ERROR }
     val warnings: List<VerificationIssue> get() = issues.filter { it.severity == VerificationSeverity.WARNING }
@@ -74,27 +79,38 @@ internal open class VerificationFileOperations {
 class EvidenceBundleVerifier internal constructor(private val files: VerificationFileOperations) {
     constructor() : this(VerificationFileOperations())
 
-    fun verify(bundle: Path): EvidenceBundleVerificationResult {
+    fun verify(
+        bundle: Path,
+        trustedPublicKey: PublicKey? = null,
+    ): EvidenceBundleVerificationResult {
         val root = bundle.toAbsolutePath().normalize()
         val issues = mutableListOf<VerificationIssue>()
+
+        fun result(schemaVersion: Int?): EvidenceBundleVerificationResult =
+            EvidenceBundleVerificationResult(
+                schemaVersion,
+                issues,
+                verifyAuthentication(root, trustedPublicKey, issues.none { it.severity == VerificationSeverity.ERROR }),
+            )
+
         if (Files.isSymbolicLink(root)) {
             issues.error(VerificationIssueCode.SYMBOLIC_LINK, "Bundle root must not be a symbolic link.")
-            return EvidenceBundleVerificationResult(null, issues)
+            return result(null)
         }
         val manifestText = readCoreFile(root, MANIFEST_FILE, VerificationIssueCode.MISSING_MANIFEST, issues)
         val timelineText = readCoreFile(root, TIMELINE_FILE, VerificationIssueCode.MISSING_TIMELINE, issues)
-        if (manifestText == null || timelineText == null) return EvidenceBundleVerificationResult(null, issues)
+        if (manifestText == null || timelineText == null) return result(null)
 
         val manifestObject =
             parseObject(manifestText, MANIFEST_FILE, issues)
-                ?: return EvidenceBundleVerificationResult(null, issues)
+                ?: return result(null)
         val timelineObject =
             parseObject(timelineText, TIMELINE_FILE, issues)
-                ?: return EvidenceBundleVerificationResult(manifestObject.schemaVersion(), issues)
+                ?: return result(manifestObject.schemaVersion())
         val schemaVersion = manifestObject.schemaVersion()
         if (schemaVersion == null) {
             issues.error(VerificationIssueCode.MALFORMED_JSON, "schemaVersion must be an integer JSON number.", MANIFEST_FILE)
-            return EvidenceBundleVerificationResult(null, issues)
+            return result(null)
         }
         if (schemaVersion !in setOf(1, V2_SCHEMA_VERSION, V3_SCHEMA_VERSION)) {
             issues.error(
@@ -102,7 +118,7 @@ class EvidenceBundleVerifier internal constructor(private val files: Verificatio
                 "Unsupported evidence schema version: $schemaVersion.",
                 MANIFEST_FILE,
             )
-            return EvidenceBundleVerificationResult(schemaVersion, issues)
+            return result(schemaVersion)
         }
 
         var rawPaths = emptyList<String>()
@@ -114,22 +130,22 @@ class EvidenceBundleVerifier internal constructor(private val files: Verificatio
                     "Schema version $schemaVersion requires evidenceFiles.",
                     MANIFEST_FILE,
                 )
-                return EvidenceBundleVerificationResult(schemaVersion, issues)
+                return result(schemaVersion)
             }
             rawPaths = validateRawInventoryPaths(rawInventory, issues)
             validateInventoryOrder(rawPaths, issues)
             if (issues.any { it.code == VerificationIssueCode.UNSAFE_INVENTORY_PATH }) {
                 scanUnexpectedFiles(root, rawPaths.toSet(), issues)
-                return EvidenceBundleVerificationResult(schemaVersion, issues)
+                return result(schemaVersion)
             }
         }
 
         val manifest =
             decodeManifest(schemaVersion, manifestText, issues)
-                ?: return EvidenceBundleVerificationResult(schemaVersion, issues)
+                ?: return result(schemaVersion)
         val timeline =
             decodeTimeline(timelineObject, timelineText, issues)
-                ?: return EvidenceBundleVerificationResult(schemaVersion, issues)
+                ?: return result(schemaVersion)
         timeline.events.groupingBy { it.id }.eachCount().filterValues { it > 1 }.keys.forEach { id ->
             issues.error(VerificationIssueCode.DUPLICATE_EVENT_ID, "Timeline event ID is duplicated: $id.", TIMELINE_FILE)
         }
@@ -138,7 +154,7 @@ class EvidenceBundleVerifier internal constructor(private val files: Verificatio
                 VerificationIssueCode.FILE_INTEGRITY_UNAVAILABLE,
                 "Schema version 1 does not bind evidence files; file integrity was not verified.",
             )
-            return EvidenceBundleVerificationResult(schemaVersion, issues)
+            return result(schemaVersion)
         }
 
         val inventoryByPath = manifest.evidenceFiles.associateBy { it.path }
@@ -166,8 +182,207 @@ class EvidenceBundleVerifier internal constructor(private val files: Verificatio
             ioIssue(issues, it.path.value) { verifyEvidenceFile(root, it.path, it.byteSize, it.sha256.value, issues) }
         }
         scanUnexpectedFiles(root, rawPaths.toSet(), issues)
-        return EvidenceBundleVerificationResult(schemaVersion, issues)
+        return result(schemaVersion)
     }
+
+    private fun verifyAuthentication(
+        root: Path,
+        trustedPublicKey: PublicKey?,
+        integrityValid: Boolean,
+    ): BundleAuthenticationResult {
+        val path = root.resolve(AUTHENTICITY_FILE)
+        if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
+            return if (trustedPublicKey == null) {
+                BundleAuthenticationResult(AuthenticationStatus.UNSIGNED)
+            } else {
+                invalid(
+                    AuthenticationIssueCode.AUTHENTICATION_REQUIRED,
+                    "Trusted authentication was requested but no signature is present.",
+                )
+            }
+        }
+        if (Files.isSymbolicLink(path)) {
+            return invalid(
+                AuthenticationIssueCode.AUTHENTICATION_SYMBOLIC_LINK,
+                "Authentication envelope must not be a symbolic link.",
+                AUTHENTICITY_FILE,
+            )
+        }
+        if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
+            return invalid(
+                AuthenticationIssueCode.AUTHENTICATION_NON_REGULAR_FILE,
+                "Authentication envelope must be a regular file.",
+                AUTHENTICITY_FILE,
+            )
+        }
+        val text =
+            try {
+                val size = Files.size(path)
+                if (size > MAX_AUTHENTICATION_FILE_BYTES) {
+                    return invalid(
+                        AuthenticationIssueCode.AUTHENTICATION_FILE_TOO_LARGE,
+                        "Authentication envelope exceeds $MAX_AUTHENTICATION_FILE_BYTES bytes.",
+                        AUTHENTICITY_FILE,
+                    )
+                }
+                Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS).use { input ->
+                    val bytes = input.readNBytes(MAX_AUTHENTICATION_FILE_BYTES.toInt() + 1)
+                    if (bytes.size > MAX_AUTHENTICATION_FILE_BYTES) {
+                        return invalid(
+                            AuthenticationIssueCode.AUTHENTICATION_FILE_TOO_LARGE,
+                            "Authentication envelope exceeds $MAX_AUTHENTICATION_FILE_BYTES bytes.",
+                            AUTHENTICITY_FILE,
+                        )
+                    }
+                    StandardCharsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(bytes)).toString()
+                }
+            } catch (error: IOException) {
+                return invalid(
+                    AuthenticationIssueCode.AUTHENTICATION_IO_ERROR,
+                    "Authentication envelope cannot be read: ${error.message}",
+                    AUTHENTICITY_FILE,
+                )
+            } catch (error: SecurityException) {
+                return invalid(
+                    AuthenticationIssueCode.AUTHENTICATION_IO_ERROR,
+                    "Authentication envelope access was denied: ${error.message}",
+                    AUTHENTICITY_FILE,
+                )
+            }
+        val envelope =
+            try {
+                evidenceJson.decodeFromString<BundleAuthenticationEnvelope>(text)
+            } catch (error: Exception) {
+                return invalid(
+                    AuthenticationIssueCode.MALFORMED_AUTHENTICATION_JSON,
+                    "Authentication envelope is malformed: ${error.message}",
+                    AUTHENTICITY_FILE,
+                )
+            }
+        if (envelope.schemaVersion != AUTHENTICATION_SCHEMA_VERSION) {
+            return invalid(
+                AuthenticationIssueCode.UNSUPPORTED_AUTHENTICATION_SCHEMA,
+                "Unsupported authentication schema version: ${envelope.schemaVersion}.",
+                AUTHENTICITY_FILE,
+                envelope,
+            )
+        }
+        if (envelope.algorithm != AUTHENTICATION_ALGORITHM) {
+            return invalid(
+                AuthenticationIssueCode.UNSUPPORTED_AUTHENTICATION_ALGORITHM,
+                "Unsupported authentication algorithm: ${envelope.algorithm}.",
+                AUTHENTICITY_FILE,
+                envelope,
+            )
+        }
+        if (envelope.coreFiles.map { it.path } != BundleAuthenticator.AUTHENTICATED_CORE_PATHS ||
+            envelope.coreFiles.any { it.byteSize < 0 }
+        ) {
+            return invalid(
+                AuthenticationIssueCode.INVALID_AUTHENTICATION_CORE_FILES,
+                "Authentication core-file description is not canonical.",
+                AUTHENTICITY_FILE,
+                envelope,
+            )
+        }
+        val signature =
+            try {
+                Base64.getDecoder().decode(envelope.signature).also {
+                    if (it.size != ED25519_SIGNATURE_BYTES) throw IllegalArgumentException("Unexpected signature size.")
+                }
+            } catch (error: IllegalArgumentException) {
+                return invalid(
+                    AuthenticationIssueCode.MALFORMED_SIGNATURE,
+                    "Authentication signature is malformed.",
+                    AUTHENTICITY_FILE,
+                    envelope,
+                )
+            }
+        val actualCore =
+            try {
+                BundleAuthenticator.describe(root)
+            } catch (error: Exception) {
+                return invalid(
+                    AuthenticationIssueCode.AUTHENTICATION_IO_ERROR,
+                    "Authenticated core files cannot be measured: ${error.message}",
+                    AUTHENTICITY_FILE,
+                    envelope,
+                )
+            }
+        envelope.coreFiles.zip(actualCore).forEach { (expected, actual) ->
+            if (expected.byteSize != actual.byteSize) {
+                return invalid(
+                    AuthenticationIssueCode.AUTHENTICATED_CORE_SIZE_MISMATCH,
+                    "Authenticated core-file byte size does not match.",
+                    expected.path,
+                    envelope,
+                )
+            }
+            if (expected.sha256 != actual.sha256) {
+                return invalid(
+                    AuthenticationIssueCode.AUTHENTICATED_CORE_SHA256_MISMATCH,
+                    "Authenticated core-file SHA-256 does not match.",
+                    expected.path,
+                    envelope,
+                )
+            }
+        }
+        if (trustedPublicKey == null) {
+            return BundleAuthenticationResult(
+                AuthenticationStatus.SIGNED_UNTRUSTED,
+                envelope.algorithm,
+                envelope.keyId,
+            )
+        }
+        if (BundleAuthenticator.keyId(trustedPublicKey) != envelope.keyId) {
+            return invalid(
+                AuthenticationIssueCode.TRUSTED_KEY_ID_MISMATCH,
+                "Authentication key ID does not match the externally trusted public key.",
+                AUTHENTICITY_FILE,
+                envelope,
+            )
+        }
+        val validSignature =
+            try {
+                BundleAuthenticator.verify(trustedPublicKey, BundleAuthenticator.signingMessage(envelope.coreFiles), signature)
+            } catch (_: Exception) {
+                false
+            }
+        if (!validSignature) {
+            return invalid(
+                AuthenticationIssueCode.INVALID_SIGNATURE,
+                "Ed25519 signature verification failed.",
+                AUTHENTICITY_FILE,
+                envelope,
+            )
+        }
+        if (!integrityValid) {
+            return invalid(
+                AuthenticationIssueCode.BUNDLE_INTEGRITY_FAILED,
+                "Authentication cannot succeed because bundle integrity verification failed.",
+                null,
+                envelope,
+            )
+        }
+        return BundleAuthenticationResult(
+            AuthenticationStatus.AUTHENTICATED,
+            envelope.algorithm,
+            envelope.keyId,
+        )
+    }
+
+    private fun invalid(
+        code: AuthenticationIssueCode,
+        message: String,
+        path: String? = null,
+        envelope: BundleAuthenticationEnvelope? = null,
+    ): BundleAuthenticationResult =
+        BundleAuthenticationResult(
+            AuthenticationStatus.INVALID,
+            envelope?.algorithm,
+            envelope?.keyId,
+            listOf(AuthenticationIssue(code, message, path)),
+        )
 
     private fun readCoreFile(
         root: Path,
@@ -415,7 +630,9 @@ class EvidenceBundleVerifier internal constructor(private val files: Verificatio
     ) = add(VerificationIssue(code, VerificationSeverity.WARNING, message, path))
 
     private companion object {
-        val CORE_FILES = setOf(MANIFEST_FILE, TIMELINE_FILE)
+        val CORE_FILES = setOf(MANIFEST_FILE, TIMELINE_FILE, AUTHENTICITY_FILE)
+        const val MAX_AUTHENTICATION_FILE_BYTES = 256 * 1024L
+        const val ED25519_SIGNATURE_BYTES = 64
     }
 
     private data class DecodedManifest(
