@@ -7,10 +7,11 @@ import io.github.fredleonam.droidproof.evidence.BundleSigningConfiguration
 import io.github.fredleonam.droidproof.evidence.Ed25519KeyLoader
 import io.github.fredleonam.droidproof.evidence.EvidenceBundleWriter
 import io.github.fredleonam.droidproof.model.DroidProofVersion
+import io.github.fredleonam.droidproof.model.EnvironmentExecutionMode
 import java.nio.file.Path
 
 fun main(args: Array<String>) {
-    require(args.size == 10) { "Expected smoke-scenario task configuration arguments." }
+    require(args.size == 11) { "Expected smoke-scenario task configuration arguments." }
     require(args[1].isNotBlank()) { "Set -Pdroidproof.apkPath to one local APK." }
     require(args[2].isNotBlank()) { "Set -Pdroidproof.scenarioPath to one local scenario JSON document." }
     require(args[3].isNotBlank()) { "Set -Pdroidproof.deviceSerial to an authorized test emulator serial." }
@@ -48,8 +49,16 @@ fun main(args: Array<String>) {
                 deviceSerial = args[3],
                 outputRoot = Path.of(args[0]),
                 environmentPath = args[8].takeIf(String::isNotBlank)?.let(Path::of),
+                environmentMode =
+                    requireNotNull(
+                        args[9].let {
+                            runCatching {
+                                EnvironmentExecutionMode.valueOf(it)
+                            }.getOrNull()
+                        },
+                    ) { "droidproof.environmentMode must be VERIFY_ONLY or APPLY_AND_RESTORE." },
                 replaceExisting = replaceExisting,
-                droidProofVersion = DroidProofVersion(args[9]),
+                droidProofVersion = DroidProofVersion(args[10]),
             ),
         )
     val location = result.output ?: result.diagnostic

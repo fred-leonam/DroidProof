@@ -20,8 +20,12 @@ import io.github.fredleonam.droidproof.model.BundleId
 import io.github.fredleonam.droidproof.model.BundleRelativePath
 import io.github.fredleonam.droidproof.model.DroidProofVersion
 import io.github.fredleonam.droidproof.model.EmulatorEnvironmentEvaluationV1
+import io.github.fredleonam.droidproof.model.EmulatorEnvironmentState
 import io.github.fredleonam.droidproof.model.EnvironmentEvaluationOutcome
+import io.github.fredleonam.droidproof.model.EnvironmentExecutionMode
 import io.github.fredleonam.droidproof.model.EnvironmentObservation
+import io.github.fredleonam.droidproof.model.EnvironmentRestorationOutcome
+import io.github.fredleonam.droidproof.model.EnvironmentTransactionDocument
 import io.github.fredleonam.droidproof.model.EventId
 import io.github.fredleonam.droidproof.model.EventSource
 import io.github.fredleonam.droidproof.model.EvidenceBundleManifestV3
@@ -53,6 +57,7 @@ data class SmokeRunRequest(
     val deviceSerial: String,
     val outputRoot: Path,
     val environmentPath: Path? = null,
+    val environmentMode: EnvironmentExecutionMode = EnvironmentExecutionMode.VERIFY_ONLY,
     val replaceExisting: Boolean = false,
     val droidProofVersion: DroidProofVersion,
     val commandTimeoutMillis: Long = 15_000,
@@ -60,6 +65,9 @@ data class SmokeRunRequest(
     init {
         require(deviceSerial.isNotBlank()) { "An explicit test-emulator serial is required." }
         require(commandTimeoutMillis in 1..3_600_000) { "Command timeout is outside supported bounds." }
+        require(environmentMode != EnvironmentExecutionMode.APPLY_AND_RESTORE || environmentPath != null) {
+            "APPLY_AND_RESTORE requires droidproof.environmentPath."
+        }
     }
 }
 
@@ -116,9 +124,36 @@ class SmokeCoordinator(
         val inputs = accepted
 
         var environmentEvaluation: EmulatorEnvironmentEvaluationV1? = null
+        var environmentTransaction: EnvironmentTransactionDocument? = null
+        var originalEnvironment: EmulatorEnvironmentState? = null
         if (inputs?.environment != null && state.canUseDevice()) {
             stage<Unit>(state, ExecutionStage.ENVIRONMENT) {
                 ensureActive()
+                if (request.environmentMode == EnvironmentExecutionMode.APPLY_AND_RESTORE) {
+                    val snapshot = device.snapshotEnvironment(request.deviceSerial, operationTimeout(request, state))
+                    if (!snapshot.isSuccessful) {
+                        abort(
+                            snapshot.detail ?: "Original emulator environment could not be captured.",
+                            snapshot.failure,
+                        )
+                    }
+                    originalEnvironment = requireNotNull(snapshot.value)
+                    environmentTransaction =
+                        EnvironmentTransactionDocument(
+                            mode = request.environmentMode,
+                            original = originalEnvironment,
+                            detail = "Original environment was observed before mutation.",
+                            restorationOutcome = EnvironmentRestorationOutcome.NOT_ATTEMPTED,
+                        )
+                    val apply =
+                        device.applyEnvironment(request.deviceSerial, inputs.environment.contract, operationTimeout(request, state))
+                    environmentTransaction =
+                        requireNotNull(environmentTransaction).copy(
+                            mutationAttempted = true,
+                            detail = "Requested environment mutation was attempted.",
+                        )
+                    if (!apply.isSuccessful) abort(apply.detail ?: "Requested emulator environment could not be applied.", apply.failure)
+                }
                 val locale = device.observeLocale(request.deviceSerial, operationTimeout(request, state))
                 if (locale.failure == DeviceFailureKind.CANCELLED) abort("Environment observation was cancelled.", locale.failure)
                 ensureActive()
@@ -131,6 +166,13 @@ class SmokeCoordinator(
                     EnvironmentEvaluator.evaluate(inputs.environment.contract, locale, orientation, animations)
                 if (environmentEvaluation?.outcome != EnvironmentEvaluationOutcome.MATCHED) {
                     throw RunAbort(requireNotNull(environmentEvaluation).explanation)
+                }
+                if (environmentTransaction != null) {
+                    environmentTransaction =
+                        requireNotNull(environmentTransaction).copy(
+                            requestedVerification = EnvironmentEvaluationOutcome.MATCHED,
+                            detail = "Requested environment was verified before scenario execution.",
+                        )
                 }
             }
         } else {
@@ -282,6 +324,52 @@ class SmokeCoordinator(
             state.skip(ExecutionStage.NETWORK_EVALUATION)
         }
 
+        if (originalEnvironment != null) {
+            stage<Unit>(state, ExecutionStage.ENVIRONMENT_RESTORE) {
+                // Do not honor cooperative cancellation here: rollback has a separate bounded timeout.
+                val restored =
+                    device.restoreEnvironment(request.deviceSerial, originalEnvironment!!, request.commandTimeoutMillis)
+                if (!restored.isSuccessful) {
+                    environmentTransaction =
+                        requireNotNull(environmentTransaction).copy(
+                            restorationAttempted = true,
+                            restorationOutcome = EnvironmentRestorationOutcome.RESTORE_UNAVAILABLE,
+                            detail = restored.detail ?: "Environment restoration was unavailable.",
+                        )
+                    throw RunAbort(requireNotNull(environmentTransaction).detail)
+                }
+                val observed = device.snapshotEnvironment(request.deviceSerial, request.commandTimeoutMillis)
+                val matches = observed.value == originalEnvironment
+                environmentTransaction =
+                    requireNotNull(environmentTransaction).copy(
+                        restorationAttempted = true,
+                        restored = observed.value,
+                        restorationOutcome =
+                            if (matches) {
+                                EnvironmentRestorationOutcome.RESTORED
+                            } else if (observed.isSuccessful) {
+                                EnvironmentRestorationOutcome.RESTORE_MISMATCH
+                            } else {
+                                EnvironmentRestorationOutcome.RESTORE_UNAVAILABLE
+                            },
+                        detail =
+                            if (matches) {
+                                "Original low-level environment state was restored and verified."
+                            } else {
+                                "Original low-level environment state could not be verified after restoration."
+                            },
+                    )
+                if (!matches) throw RunAbort(requireNotNull(environmentTransaction).detail)
+            }
+        } else if (inputs?.environment != null) {
+            environmentTransaction =
+                EnvironmentTransactionDocument(
+                    mode = request.environmentMode,
+                    restorationOutcome = EnvironmentRestorationOutcome.NOT_REQUIRED,
+                    detail = "Verify-only mode did not mutate the emulator.",
+                )
+        }
+
         val bindingDocument =
             bindingState?.let {
                 ArtifactBindingDocument(
@@ -320,6 +408,7 @@ class SmokeCoordinator(
                 networkFiles,
                 networkEvents,
                 environmentEvaluation,
+                environmentTransaction,
                 state,
             )
         deleteWorkDirectory(workDirectory)
@@ -506,6 +595,7 @@ class SmokeCoordinator(
         networkFiles: List<EvidenceFileInput>,
         networkEvents: List<TimelineEvent>,
         environmentEvaluation: EmulatorEnvironmentEvaluationV1?,
+        environmentTransaction: EnvironmentTransactionDocument?,
         state: MutableExecutionState,
     ): SmokeRunResult {
         val finalizationStarted = wallClock.instant().toString()
@@ -517,9 +607,13 @@ class SmokeCoordinator(
         val evaluated = assertionAttempt?.document?.outcome in setOf(AssertionOutcome.MATCHED, AssertionOutcome.NOT_MATCHED)
         val environmentComplete =
             accepted.environment == null || environmentEvaluation?.outcome == EnvironmentEvaluationOutcome.MATCHED
+        val environmentRestored =
+            (environmentTransaction?.restorationOutcome ?: EnvironmentRestorationOutcome.NOT_REQUIRED) in
+                setOf(EnvironmentRestorationOutcome.NOT_REQUIRED, EnvironmentRestorationOutcome.RESTORED)
         val completeness =
             if (
                 evaluated && hierarchy != null && screenshot != null && finalBindingMatches && environmentComplete &&
+                environmentRestored &&
                 networkEvaluation?.outcome != NetworkEvaluationOutcome.NOT_EVALUATED
             ) {
                 EvidenceCompleteness.COMPLETE
@@ -581,12 +675,17 @@ class SmokeCoordinator(
                     networkFiles,
                     captureResult,
                     environmentEvaluation,
+                    environmentTransaction,
                 )
             val manifest =
                 manifest(request, executionId, accepted, binding, bindingState, captureResult, environmentEvaluation, resultDocument)
             val bundle = runDirectory.resolve("bundle")
             publisher.publish(
-                EvidenceBundleRequestV3(manifest, timeline(resultDocument, networkEvents, environmentEvaluation), sources),
+                EvidenceBundleRequestV3(
+                    manifest,
+                    timeline(resultDocument, networkEvents, environmentEvaluation, environmentTransaction),
+                    sources,
+                ),
                 bundle,
             )
             val verification = verifier.verify(bundle)
@@ -621,6 +720,7 @@ class SmokeCoordinator(
         networkFiles: List<EvidenceFileInput>,
         captureResult: CaptureResult?,
         environmentEvaluation: EmulatorEnvironmentEvaluationV1?,
+        environmentTransaction: EnvironmentTransactionDocument?,
     ): List<EvidenceFileInput> {
         val documents = Files.createDirectories(workDirectory.resolve("documents"))
         val scenario = documents.resolve("scenario.json").also { Files.write(it, accepted.scenario.exactBytes) }
@@ -640,6 +740,10 @@ class SmokeCoordinator(
             environmentEvaluation?.let { evaluation ->
                 val evaluationFile = documents.resolve("environment-evaluation.json").also { writeJson(it, evaluation) }
                 files += EvidenceFileInput(evaluationFile, ENVIRONMENT_EVALUATION_PATH, "application/json", EvidenceFileRole.TEST_RESULT)
+            }
+            environmentTransaction?.let { transaction ->
+                val transactionFile = documents.resolve("environment-transaction.json").also { writeJson(it, transaction) }
+                files += EvidenceFileInput(transactionFile, ENVIRONMENT_TRANSACTION_PATH, "application/json", EvidenceFileRole.TEST_RESULT)
             }
         }
         captureResult?.let { captured ->
@@ -746,6 +850,7 @@ class SmokeCoordinator(
         result: ExecutionResultDocument,
         networkEvents: List<TimelineEvent>,
         environmentEvaluation: EmulatorEnvironmentEvaluationV1?,
+        environmentTransaction: EnvironmentTransactionDocument?,
     ): List<TimelineEvent> =
         result.stages.flatMapIndexed { stageIndex, stage ->
             val stageNumber = (stageIndex + 1).toString().padStart(3, '0')
@@ -754,6 +859,10 @@ class SmokeCoordinator(
                     ExecutionStage.ENVIRONMENT ->
                         environmentEvaluation?.let {
                             listOf(EvidenceReference(ENVIRONMENT_EVALUATION_PATH, "application/json"))
+                        }.orEmpty()
+                    ExecutionStage.ENVIRONMENT_RESTORE ->
+                        environmentTransaction?.let {
+                            listOf(EvidenceReference(ENVIRONMENT_TRANSACTION_PATH, "application/json"))
                         }.orEmpty()
                     ExecutionStage.ASSERTION ->
                         result.assertion.hierarchyPath?.let {
@@ -982,6 +1091,7 @@ class SmokeCoordinator(
         val BINDING_PATH = BundleRelativePath("execution/artifact-binding.json")
         val ENVIRONMENT_CONTRACT_PATH = BundleRelativePath("environment/contract.json")
         val ENVIRONMENT_EVALUATION_PATH = BundleRelativePath("environment/evaluation.json")
+        val ENVIRONMENT_TRANSACTION_PATH = BundleRelativePath("environment/transaction.json")
         val HIERARCHY_PATH = BundleRelativePath("ui/hierarchy.xml")
         val CAPTURE_PATH = BundleRelativePath("capture/capture.json")
         val SCREENSHOT_PATH = BundleRelativePath("screenshots/display.png")

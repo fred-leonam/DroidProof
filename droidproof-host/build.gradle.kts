@@ -52,6 +52,7 @@ tasks.register<JavaExec>("runSmokeScenario") {
         "signingPrivateKeyPath" to "",
         "signingPublicKeyPath" to "",
         "environmentPath" to "",
+        "environmentMode" to "VERIFY_ONLY",
     )) {
         args(providers.gradleProperty("droidproof.$name").orElse(default).get())
     }
