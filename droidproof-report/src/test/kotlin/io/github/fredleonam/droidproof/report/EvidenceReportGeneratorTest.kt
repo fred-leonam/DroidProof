@@ -1,5 +1,6 @@
 package io.github.fredleonam.droidproof.report
 
+import io.github.fredleonam.droidproof.evidence.BundleSigningConfiguration
 import io.github.fredleonam.droidproof.evidence.EvidenceBundleRequest
 import io.github.fredleonam.droidproof.evidence.EvidenceBundleRequestV3
 import io.github.fredleonam.droidproof.evidence.EvidenceBundleVerifier
@@ -44,6 +45,8 @@ import org.junit.jupiter.api.io.TempDir
 import java.net.URI
 import java.nio.file.Files
 import java.nio.file.Path
+import java.security.KeyPair
+import java.security.KeyPairGenerator
 import java.util.Base64
 import kotlin.io.path.readBytes
 import kotlin.io.path.readText
@@ -73,7 +76,7 @@ class EvidenceReportGeneratorTest {
         assertEquals(report.toAbsolutePath(), result.output)
         assertContainsAll(
             html,
-            "Bundle verification passed",
+            "Bundle integrity verification passed",
             "Schema version</dt><dd>3",
             "smoke-report-run",
             "smoke-report",
@@ -104,7 +107,7 @@ class EvidenceReportGeneratorTest {
             "screenshots/display.png",
             "image/png",
             "execution/result.json",
-            "SHA-256 consistency does not authenticate the evidence producer",
+            "SHA-256 consistency alone does not establish producer authenticity",
         )
         assertTrue(html.contains("class=\"badge status-passed\">PASSED"))
         assertTrue(html.contains("<img"))
@@ -322,14 +325,49 @@ class EvidenceReportGeneratorTest {
     }
 
     @Test
+    fun `report distinguishes unsigned signed-untrusted authenticated and failed authentication`() {
+        val keys = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
+        val wrongKeys = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
+
+        val unsigned = reportFor(writeV3Bundle("auth-unsigned"), "auth-unsigned.html")
+        assertTrue(unsigned.contains("Bundle is unsigned"))
+        assertFalse(unsigned.contains("AUTHENTICATED"))
+        assertFalse(unsigned.contains("Trusted key ID"))
+
+        val signedBundle = writeV3Bundle("auth-signed", signing = keys)
+        val untrusted = reportFor(signedBundle, "auth-untrusted.html")
+        assertTrue(untrusted.contains("Signature present; authenticity was not established"))
+        assertTrue(untrusted.contains("Claimed key ID"))
+        assertFalse(untrusted.contains("AUTHENTICATED"))
+        assertFalse(untrusted.contains("Trusted key ID"))
+
+        val authenticatedReport = directory.resolve("auth-authenticated.html")
+        val authenticated = generator.generate(signedBundle, authenticatedReport, keys.public)
+        val authenticatedHtml = authenticatedReport.readText()
+        assertTrue(authenticated.verification.authentication.isAuthenticated)
+        assertContainsAll(authenticatedHtml, "AUTHENTICATED with externally supplied public key", "Ed25519", "Trusted key ID")
+
+        val failedReport = directory.resolve("auth-failed.html")
+        val failed = generator.generate(signedBundle, failedReport, wrongKeys.public)
+        val failedHtml = failedReport.readText()
+        assertFalse(failed.verification.authentication.isAuthenticated)
+        assertContainsAll(failedHtml, "Bundle verification failed", "TRUSTED_KEY_ID_MISMATCH")
+        assertFalse(failedHtml.contains("smoke-report-run"))
+        assertFalse(failedHtml.contains("<img"))
+    }
+
+    @Test
     fun `command requires bundle property and fails after writing an invalid diagnostic report`() {
-        val missing = assertFailsWith<IllegalArgumentException> { main(arrayOf("", directory.resolve("missing.html").toString())) }
+        val missing =
+            assertFailsWith<IllegalArgumentException> {
+                main(arrayOf("", directory.resolve("missing.html").toString(), ""))
+            }
         assertTrue(missing.message.orEmpty().contains("droidproof.bundlePath"))
 
         val bundle = writeV3Bundle("command-invalid")
         bundle.resolve("execution/result.json").writeText("tampered\n")
         val report = directory.resolve("command-invalid.html")
-        assertFailsWith<IllegalStateException> { main(arrayOf(bundle.toString(), report.toString())) }
+        assertFailsWith<IllegalStateException> { main(arrayOf(bundle.toString(), report.toString(), "")) }
         assertTrue(report.readText().contains("Bundle verification failed"))
     }
 
@@ -341,6 +379,7 @@ class EvidenceReportGeneratorTest {
         completeness: EvidenceCompleteness = EvidenceCompleteness.COMPLETE,
         requestContractOutcome: String = "MATCHED",
         requestContractIssues: String = "",
+        signing: KeyPair? = null,
     ): Path {
         val result = source("$name-result.json", "{}\n")
         val binding = source("$name-binding.json", "{}\n")
@@ -482,6 +521,7 @@ class EvidenceReportGeneratorTest {
                     ),
                 ),
                 bundle,
+                signing = signing?.let { BundleSigningConfiguration(it.private, it.public) },
             )
         }
     }

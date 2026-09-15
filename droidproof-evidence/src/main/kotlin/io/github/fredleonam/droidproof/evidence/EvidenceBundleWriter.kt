@@ -24,6 +24,7 @@ import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.BasicFileAttributes
 import java.security.MessageDigest
+import java.util.Base64
 import java.util.Locale
 
 const val V2_SCHEMA_VERSION = 2
@@ -99,13 +100,15 @@ class EvidenceBundleWriter internal constructor(
         manifest: EvidenceBundleManifest,
         events: List<TimelineEvent>,
         overwrite: Boolean = false,
-    ): Path = write(EvidenceBundleRequest(manifest, events), destination, overwrite)
+        signing: BundleSigningConfiguration? = null,
+    ): Path = write(EvidenceBundleRequest(manifest, events), destination, overwrite, signing)
 
     /** Fully constructs a schema-v2 bundle beside [destination] before installing it. */
     fun write(
         request: EvidenceBundleRequest,
         destination: Path,
         overwrite: Boolean = false,
+        signing: BundleSigningConfiguration? = null,
     ): Path {
         validate(request)
         val target = safeDestination(destination)
@@ -123,9 +126,12 @@ class EvidenceBundleWriter internal constructor(
             val inventory = request.evidenceFiles.map { copyEvidenceFile(staging, it) }.sortedBy { it.path.value }
             val manifest = request.manifest.copy(evidenceFiles = inventory)
             writeJsonDocuments(staging, manifest, request.events)
-            val verification = EvidenceBundleVerifier().verify(staging)
-            if (!verification.isValid) {
-                throw EvidenceBundleValidationException("Constructed bundle failed verification: ${verification.issues}")
+            signing?.let { writeAuthenticationEnvelope(staging, it) }
+            val verification = EvidenceBundleVerifier().verify(staging, signing?.publicKey)
+            if (!verification.isValid || (signing != null && !verification.authentication.isAuthenticated)) {
+                throw EvidenceBundleValidationException(
+                    "Constructed bundle failed verification: ${verification.issues + verification.authentication.issues}",
+                )
             }
             install(staging, target, overwrite)
         } finally {
@@ -139,6 +145,7 @@ class EvidenceBundleWriter internal constructor(
         request: EvidenceBundleRequestV3,
         destination: Path,
         overwrite: Boolean = false,
+        signing: BundleSigningConfiguration? = null,
     ): Path {
         validate(request)
         val target = safeDestination(destination)
@@ -156,9 +163,12 @@ class EvidenceBundleWriter internal constructor(
             val inventory = request.evidenceFiles.map { copyEvidenceFile(staging, it) }.sortedBy { it.path.value }
             val manifest = request.manifest.copy(evidenceFiles = inventory)
             writeJsonDocuments(staging, evidenceJson.encodeToString(manifest), request.events)
-            val verification = EvidenceBundleVerifier().verify(staging)
-            if (!verification.isValid) {
-                throw EvidenceBundleValidationException("Constructed bundle failed verification: ${verification.issues}")
+            signing?.let { writeAuthenticationEnvelope(staging, it) }
+            val verification = EvidenceBundleVerifier().verify(staging, signing?.publicKey)
+            if (!verification.isValid || (signing != null && !verification.authentication.isAuthenticated)) {
+                throw EvidenceBundleValidationException(
+                    "Constructed bundle failed verification: ${verification.issues + verification.authentication.issues}",
+                )
             }
             install(staging, target, overwrite)
         } finally {
@@ -311,6 +321,27 @@ class EvidenceBundleWriter internal constructor(
         Files.writeString(
             directory.resolve(TIMELINE_FILE),
             evidenceJson.encodeToString(TimelineDocument(canonicalEvents(events))) + "\n",
+            StandardCharsets.UTF_8,
+        )
+    }
+
+    private fun writeAuthenticationEnvelope(
+        directory: Path,
+        signing: BundleSigningConfiguration,
+    ) {
+        val coreFiles = BundleAuthenticator.describe(directory)
+        val signature = BundleAuthenticator.sign(signing.privateKey, BundleAuthenticator.signingMessage(coreFiles))
+        val envelope =
+            BundleAuthenticationEnvelope(
+                schemaVersion = AUTHENTICATION_SCHEMA_VERSION,
+                algorithm = AUTHENTICATION_ALGORITHM,
+                keyId = BundleAuthenticator.keyId(signing.publicKey),
+                coreFiles = coreFiles,
+                signature = Base64.getEncoder().encodeToString(signature),
+            )
+        Files.writeString(
+            directory.resolve(AUTHENTICITY_FILE),
+            evidenceJson.encodeToString(envelope) + "\n",
             StandardCharsets.UTF_8,
         )
     }

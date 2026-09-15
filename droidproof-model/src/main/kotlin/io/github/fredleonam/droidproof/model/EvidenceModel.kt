@@ -417,4 +417,4 @@ private val WINDOWS_INVALID_PATH_CHARACTERS = setOf('<', '>', ':', '\"', '|', '?
 private val WINDOWS_RESERVED_NAMES =
     setOf("CON", "PRN", "AUX", "NUL") +
         (1..9).flatMap { listOf("COM$it", "LPT$it") }
-private val RESERVED_BUNDLE_PATHS = setOf("manifest.json", "timeline.json")
+private val RESERVED_BUNDLE_PATHS = setOf("manifest.json", "timeline.json", "authenticity.json")
