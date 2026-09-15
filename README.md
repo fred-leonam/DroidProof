@@ -2,7 +2,7 @@
 
 **Artifact-bound, evidence-oriented verification for Android applications.**
 
-DroidProof is an early Kotlin/JVM prototype. Its current vertical slice installs an exact APK on an explicitly selected emulator, executes a narrow ordered UI scenario, can run the sample application's real HTTP retry against a controlled local backend, captures UI and network observations, publishes an integrity-bound evidence bundle, verifies it, and renders an offline HTML report.
+DroidProof is an early Kotlin/JVM prototype. Its current vertical slice installs an exact APK on an explicitly selected emulator, enters a known UI value, runs the sample application's real HTTP retry against a controlled local backend, verifies the server-observed request contract, captures UI and network observations, publishes an integrity-bound evidence bundle, verifies it, and renders an offline HTML report.
 
 The APIs and schemas are not a stable release.
 
@@ -11,10 +11,10 @@ The APIs and schemas are not a stable release.
 - `droidproof-model` owns validated evidence identities, portable bundle paths, evidence descriptors, schema-v1/v2 legacy manifests, the schema-v3 execution manifest, and canonical timeline events.
 - `droidproof-evidence` transactionally writes bundles, streams SHA-256 and byte-size inventory data, and verifies schemas v1, v2, and v3 with structured issues. Its synthetic sample now receives the authoritative Gradle project version.
 - `droidproof-device` provides bounded ADB process execution and explicit screenshot, allowlisted metadata, and opt-in PID-filtered logcat collection.
-- `droidproof-mock-server` is a small Android-independent JDK HTTP server. It binds only to `127.0.0.1`, uses an ephemeral host port, serves the narrow deterministic `POST /orders` response plan, records bounded exchanges, and exposes explicit start/inspect/stop lifecycle methods.
-- `droidproof-host` performs preflight, exact APK byte binding, optional mock-server and serial-scoped ADB reverse setup, activity launch, ordered UI steps, screenshot capture, final APK identity checking, network evaluation, cleanup, bundle publication, and verification.
-- `droidproof-report` verifies a bundle before rendering a deterministic static HTML report. Valid network bundles get a Network section with safe exchange metadata and links to verified exchange files. Invalid bundles get only a limited diagnostic report.
-- `samples/smoke-app` preserves the v1/v2 greeting flow and adds a separate real HTTP order action. That action performs network I/O off the main thread, retries exactly once after HTTP 503, accepts the deterministic HTTP 201 JSON order ID, and displays `Order order-42 created`.
+- `droidproof-mock-server` is a small Android-independent JDK HTTP server. It binds only to `127.0.0.1`, uses an ephemeral host port, serves the narrow deterministic `POST /orders` response plan, performs bounded exact-byte request-contract evaluation, records safe exchange metadata, and exposes explicit start/inspect/stop lifecycle methods.
+- `droidproof-host` performs preflight, exact APK byte binding, optional mock-server and serial-scoped ADB reverse setup, activity launch, ordered UI steps, screenshot capture, final APK identity checking, response-sequence and request-contract evaluation, cleanup, bundle publication, and verification.
+- `droidproof-report` verifies a bundle before rendering a deterministic static HTML report. Valid network bundles show safe request-contract outcomes, issue codes, request size/SHA-256 metadata, response status, and links to verified exchange files. Invalid bundles get only a limited diagnostic report.
+- `samples/smoke-app` preserves the v1/v2 greeting flow and adds a separate real HTTP order action. That action performs network I/O off the main thread, retries exactly once after HTTP 503, accepts the deterministic HTTP 201 JSON order ID, and displays `Order order-42 created`. Its single-task launch resets the demo UI between consecutive scenario runs.
 
 Build and test all JVM modules with JDK 17:
 
@@ -31,11 +31,14 @@ Scenario schema versions and evidence schema versions are separate contracts.
 - Scenario v1 retains its single exact UI assertion.
 - Scenario v2 retains the ordered `typeTextUiNode`, `tapUiNode`, and `assertUiNode` actions. Existing checked-in v1/v2 scenarios remain valid and keep their behavior.
 - Scenario v3 adds one narrow `backendPlan` for `POST /orders`, a stable device-side port, strict request/response byte limits, and an ordered `responsePlan`. It does not change v2 semantics or provide arbitrary scripting.
+- Scenario v4 retains that single controlled endpoint and requires one `expectedRequest` containing a narrowly validated media type and non-empty JSON body. Every planned retry request must match the expected method, path, media type, UTF-8 byte size, and SHA-256. V4 does not reinterpret or add request matching to v3.
 - Evidence schema v1 remains readable with a `FILE_INTEGRITY_UNAVAILABLE` warning.
 - Evidence schema v2 retains its integrity-bound file inventory and synthetic writer.
 - Evidence schema v3 remains the execution-bundle format. The network milestone does not bump it: `EvidenceFileRole.NETWORK`, `EventSource.MOCK_SERVER`, inventory bindings, and timeline evidence references already express the new observations.
 
-Unknown scenario and evidence fields fail parsing. Scenario documents are bounded to 1 MiB and preserved byte-for-byte with their SHA-256. UI selectors remain package-qualified; input text remains restricted to 1–128 non-secret ASCII identifier characters.
+Unknown scenario and evidence fields fail parsing. Scenario documents are bounded to 1 MiB and preserved byte-for-byte with their SHA-256. UI selectors remain package-qualified; input text remains restricted to 1–128 non-secret ASCII identifier characters. The v4 expected body must fit the configured request bound and be valid JSON, but matching is deliberately byte-exact rather than semantic JSON equivalence.
+
+V4 accepts `application/json` with either no parameters or exactly one unquoted `charset=utf-8` parameter. Type, subtype, parameter name, and UTF-8 token are case-normalized; optional separator whitespace is normalized. Parameter presence remains significant, so `application/json` does not match `application/json; charset=utf-8`. Other parameters, charsets, quoted values, control characters, and malformed values are rejected.
 
 ## Synthetic evidence without Android
 
@@ -43,7 +46,7 @@ Unknown scenario and evidence fields fail parsing. Scenario documents are bounde
 ./gradlew :droidproof-evidence:generateSampleEvidence
 ```
 
-This writes and verifies `droidproof-evidence/build/droidproof-samples/proof-checkout-offline-retry/`. It is a schema-v2 API sample; its network document is synthetic and is distinct from the real mock-server observations produced by scenario v3.
+This writes and verifies `droidproof-evidence/build/droidproof-samples/proof-checkout-offline-retry/`. It is a schema-v2 API sample; its network document is synthetic and is distinct from the real mock-server observations produced by scenario v3/v4.
 
 ## Standalone device capture
 
@@ -67,11 +70,11 @@ Optional PID-filtered logcat remains opt-in:
 
 See [ADR 0003](docs/adr/0003-android-device-capture.md) for output, timeout, privacy, and attribution limits.
 
-## Real deterministic network demonstration
+## Real HTTP request-contract demonstration
 
 The live task requires one local APK, the exact serial of an already-authorized emulator in primary user 0, and installed ADB. It does not create or boot an emulator.
 
-Build the standalone non-debuggable sample release. Android Gradle Plugin 8.8.2 uses Gradle 8.10.2, JDK 17, and Android compile SDK 35. Generate a disposable local key outside the repository:
+Build the standalone non-debuggable sample release from the repository root. Android Gradle Plugin 8.8.2 uses Gradle 8.10.2, JDK 17, and Android compile SDK 35. Generate a disposable local key outside the repository and point `ANDROID_HOME` at the installed SDK:
 
 ```bash
 keytool -genkeypair -keystore /tmp/droidproof-smoke-keystore.jks \
@@ -81,28 +84,30 @@ keytool -genkeypair -keystore /tmp/droidproof-smoke-keystore.jks \
 
 DROIDPROOF_SAMPLE_STORE_PASSWORD=droidproof \
 DROIDPROOF_SAMPLE_KEY_PASSWORD=droidproof \
+ANDROID_HOME=/absolute/path/to/Android/Sdk \
 ./gradlew -p samples/smoke-app assembleRelease \
   -Pdroidproof.sample.keystore=/tmp/droidproof-smoke-keystore.jks \
   -Pdroidproof.sample.keyAlias=droidproof-smoke
 ```
 
-Confirm the emulator serial, then run the checked-in scenario-v3 demonstration:
+Confirm the emulator serial, then run the checked-in passing scenario-v4 demonstration. The APK and scenario properties must be absolute paths; `$PWD` provides those when the command is run from the repository root:
 
 ```bash
 ./gradlew :droidproof-host:runSmokeScenario \
-  -Pdroidproof.apkPath=samples/smoke-app/build/outputs/apk/release/DroidProofSmokeApp-release.apk \
-  -Pdroidproof.scenarioPath=samples/smoke-app/scenarios/network-passing.json \
+  -Pdroidproof.apkPath="$PWD/samples/smoke-app/build/outputs/apk/release/DroidProofSmokeApp-release.apk" \
+  -Pdroidproof.scenarioPath="$PWD/samples/smoke-app/scenarios/network-request-passing.json" \
   -Pdroidproof.deviceSerial=emulator-5554 \
-  -Pdroidproof.adbPath=/absolute/path/to/Android/Sdk/platform-tools/adb
+  -Pdroidproof.adbPath=/absolute/path/to/Android/Sdk/platform-tools/adb \
+  -Pdroidproof.replaceExisting=true
 ```
 
-The scenario enters `DroidProof42`, taps `order_action`, and asserts `Order order-42 created`. During execution DroidProof:
+The scenario explicitly repeats the non-secret literal `DroidProof42` in the `typeTextUiNode` step and the expected body `{"customer":"DroidProof42"}`. There is no variable interpolation or dynamic UI-to-request binding. During execution DroidProof:
 
 1. starts `droidproof-mock-server` on an ephemeral `127.0.0.1` host port;
 2. creates `adb -s <serial> reverse tcp:38637 tcp:<host-port>`;
-3. observes the application's first `POST /orders` and returns HTTP 503;
-4. observes its one deterministic retry and returns HTTP 201 with `{"orderId":"order-42"}`;
-5. evaluates both the ordered server exchange sequence and final UI assertion;
+3. receives the application's first real `POST /orders` bytes, verifies its media type and exact bounded body contract, and returns HTTP 503;
+4. receives the retry, verifies the same request contract again, and returns HTTP 201 with `{"orderId":"order-42"}`;
+5. asserts the final UI text `Order order-42 created` and evaluates the ordered server exchange sequence;
 6. removes only the owned reverse mapping and stops the owned server; and
 7. publishes and verifies the evidence bundle.
 
@@ -129,11 +134,21 @@ bundle/
     └── 002.json
 ```
 
-Each network exchange document comes from the actual controlled server observation and contains a host observation timestamp, server sequence, bounded method/path, bounded request and response body metadata, response status, and response-plan match metadata. Request and response bodies are not copied into exchange documents; configured response bodies remain in the exact scenario evidence. Every network file is inventoried with role `network`, byte size, and SHA-256, and every server event links to its file from the canonical timeline.
+Each network exchange document comes from the actual controlled server observation and contains a host observation timestamp, server sequence, bounded method/path, bounded request and response body metadata, response status, response-plan match metadata, and a request-contract outcome of `MATCHED`, `MISMATCHED`, or `NOT_EVALUATED`. Deterministic issue codes distinguish wrong method/path/media type, body size/hash differences, incomplete reads, and limit excess. Request and response bodies are not copied into exchange documents; the configured expected request and responses remain in the exact scenario evidence. Every network file is inventoried with role `network`, byte size, and SHA-256, and every server event links to its file from the canonical timeline.
 
-Success requires completed execution, matched UI assertion, matched ordered network expectation, matching APK bytes before and after, complete required evidence, and successful bundle verification. A UI pass with a network mismatch and a network match with a UI failure are both behavioral failures. Infrastructure failure or cancellation yields `NOT_EVALUATED`, rather than a fabricated behavioral result.
+Success requires completed execution, matched UI assertion, two matched request contracts, matched ordered response plan and exchange count, matching APK bytes before and after, complete required evidence, and successful bundle verification. A complete request mismatch is a behavioral failure: execution remains `COMPLETED`, the verdict is `FAILED`, and the integrity-valid bundle is retained. Unavailable/incomplete request collection, other infrastructure failure, or cancellation yields `NOT_EVALUATED`, rather than a fabricated request match or mismatch.
 
-The v1 `passing.json`/`failing.json` and v2 `interactive-passing.json`/`interactive-failing.json` demonstrations remain available. Add `-Pdroidproof.replaceExisting=true` only when intentionally replacing different installed bytes for the target package.
+Run the intentional v4 failure with the same APK and `network-request-failing.json`. It keeps the UI input and application behavior unchanged but expects `{"customer":"WrongCustomer"}`. The app still reaches `Order order-42 created`; both observed requests are reported as mismatches, the execution is `COMPLETED`, the scenario verdict is `FAILED`, and the Gradle task exits nonzero because the success criteria were deliberately not met:
+
+```bash
+./gradlew :droidproof-host:runSmokeScenario \
+  -Pdroidproof.apkPath="$PWD/samples/smoke-app/build/outputs/apk/release/DroidProofSmokeApp-release.apk" \
+  -Pdroidproof.scenarioPath="$PWD/samples/smoke-app/scenarios/network-request-failing.json" \
+  -Pdroidproof.deviceSerial=emulator-5554 \
+  -Pdroidproof.adbPath=/absolute/path/to/Android/Sdk/platform-tools/adb
+```
+
+The v1 `passing.json`/`failing.json`, v2 `interactive-passing.json`/`interactive-failing.json`, and v3 `network-passing.json` demonstrations remain unchanged and supported. Add `-Pdroidproof.replaceExisting=true` only when intentionally replacing different installed bytes for the target package.
 
 ## Offline HTML report
 
@@ -148,20 +163,21 @@ Generate a report from a preserved bundle, using paths outside that bundle:
   -Pdroidproof.reportPath=/absolute/path/to/report.html
 ```
 
-The default output is `droidproof-report/build/reports/droidproof/evidence-report.html`. The report has inline CSS, no JavaScript, and no external resources. It shows verified execution, artifact, environment, timeline, screenshot, inventory, and network metadata. Network bodies are not injected into HTML; exchange rows link to verified local evidence files. If any registered network or other evidence is missing or tampered, verification fails and the report omits all unverified artifact, scenario, timeline, network, and preview content.
+The default output is `droidproof-report/build/reports/droidproof/evidence-report.html`. The report has inline CSS, no JavaScript, and no external resources. It shows verified execution, artifact, environment, timeline, screenshot, inventory, and network metadata. V4 exchange rows show request-contract outcome and issue codes, observed request byte size and SHA-256, and response status. Network bodies are not injected into HTML; exchange rows link to verified local evidence files. If any registered network or other evidence is missing or tampered, verification fails and the report omits all unverified artifact, scenario, timeline, network, and preview content.
 
 The HTML is a derived view and is not itself evidence. See [ADR 0007](docs/adr/0007-static-html-evidence-reports.md).
 
 ## Security and proof boundary
 
 - The mock server binds only to IPv4 loopback. ADB reverse makes the stable device endpoint available without exposing the server to the LAN.
-- Scenario-v3 body limits are 1 byte through 1 MiB, response plans contain 1–16 responses, and accepted exchange observations are bounded. The checked-in sample uses 4096-byte request and response limits.
-- Network evidence proves what DroidProof's controlled mock server observed and which configured response it selected. It is not packet capture, arbitrary traffic interception, proof that no other calls occurred, TLS interception, or a globally synchronized causal trace.
+- Scenario-v3/v4 body limits are 1 byte through 1 MiB, response plans contain 1–16 responses, and accepted exchange observations are bounded. The checked-in sample uses 4096-byte request and response limits. The server retains at most the limit plus one detection byte while handling a request.
+- The observed request body is read once and retained only internally while matching. Exchange evidence stores completeness, captured size, SHA-256, outcome, and issue codes—not the body. The expected body remains in scenario evidence and must use non-secret test data; hashes and sizes are identifying metadata, not anonymization.
+- DroidProof proves what its controlled mock server observed. It does not prove that no other network traffic occurred. It is not a packet capture. It is not TLS interception. It does not authenticate the producer of the bundle.
 - Host, Android, and server wall clocks are not treated as a shared causal clock. The controlled server's sequence establishes order only among its own exchanges.
 - Evidence hashes establish consistency with the manifest, not authenticity. Someone able to rewrite both evidence and manifest can create another self-consistent bundle.
 - Screenshots, UI hierarchy, scenario values, logcat, request metadata, response plans, and network evidence can contain sensitive test data. Keep bundles local or access-controlled; do not automatically upload them as public CI artifacts.
 
-See [ADR 0008](docs/adr/0008-deterministic-network-evidence.md) for the network design and proof boundary.
+See [ADR 0008](docs/adr/0008-deterministic-network-evidence.md) and [ADR 0009](docs/adr/0009-request-contract-verification.md) for the network design and proof boundary.
 
 ## Component status and remaining limitations
 
@@ -172,7 +188,8 @@ See [ADR 0008](docs/adr/0008-deterministic-network-evidence.md) for the network 
 | Artifact-bound host smoke execution | Implemented for one APK, one selected emulator, and primary user 0 |
 | Ordered View-based UI text/tap/assert | Implemented narrow resource-ID/exact-text slice |
 | Deterministic loopback mock server and ADB reverse | Implemented for `POST /orders` ordered responses |
-| Real network exchange evidence and report section | Implemented for the controlled server observations |
+| Exact HTTP request-contract verification | Implemented for one v4 JSON body/media type on `POST /orders` |
+| Real network exchange evidence and report section | Implemented with request contract outcome, issues, size, and SHA-256 |
 | Emulator lifecycle management | Not implemented |
 | Arbitrary traffic interception or TLS MITM | Not implemented |
 | General endpoint scripting or generalized fault injection | Not implemented |
@@ -180,7 +197,7 @@ See [ADR 0008](docs/adr/0008-deterministic-network-evidence.md) for the network 
 | Published Gradle plugin, general CLI, or general-purpose scenario DSL | Not implemented |
 | Evidence signing or external trust root | Not implemented |
 
-The next logical slice is broader controlled endpoint behavior and correlation without weakening the current artifact, lifecycle, and evidence boundaries—not arbitrary interception or a general scripting system.
+The next recommended milestone is authenticated evidence bundles with a narrow signing and trust-verification model.
 
 ## Architecture decisions
 
@@ -192,3 +209,4 @@ The next logical slice is broader controlled endpoint behavior and correlation w
 - [ADR 0006](docs/adr/0006-bounded-ui-text-entry.md): bounded text input
 - [ADR 0007](docs/adr/0007-static-html-evidence-reports.md): verified static report
 - [ADR 0008](docs/adr/0008-deterministic-network-evidence.md): deterministic mock-server network evidence
+- [ADR 0009](docs/adr/0009-request-contract-verification.md): bounded HTTP request-contract verification

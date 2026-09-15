@@ -4,11 +4,14 @@ import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
 import kotlinx.serialization.Serializable
 import java.io.ByteArrayOutputStream
+import java.io.IOException
+import java.io.InputStream
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.time.Clock
+import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -30,12 +33,28 @@ data class MockServerPlan(
     val method: String,
     val path: String,
     val responses: List<PlannedHttpResponse>,
+    val expectedRequest: ExpectedHttpRequest? = null,
 ) {
     init {
         require(method in SUPPORTED_METHODS) { "Only the POST method is supported by this milestone." }
         require(path == "/orders") { "Only the /orders endpoint is supported by this milestone." }
         require(responses.size in 1..MAX_RESPONSES) { "A response plan must contain 1 to $MAX_RESPONSES responses." }
     }
+}
+
+data class ExpectedHttpRequest(
+    val mediaType: String,
+    val body: String,
+) {
+    init {
+        require(body.isNotEmpty()) { "Expected request body must not be empty." }
+        require(parseSupportedJsonMediaType(mediaType) != null) {
+            "Expected request media type must be application/json with at most charset=utf-8."
+        }
+    }
+
+    internal val bodyBytes: ByteArray = body.toByteArray(StandardCharsets.UTF_8)
+    internal val parsedMediaType: ParsedMediaType = requireNotNull(parseSupportedJsonMediaType(mediaType))
 }
 
 data class MockServerLimits(
@@ -58,6 +77,32 @@ data class HttpBodyObservation(
 )
 
 @Serializable
+enum class RequestContractOutcome {
+    MATCHED,
+    MISMATCHED,
+    NOT_EVALUATED,
+}
+
+@Serializable
+enum class RequestContractIssue {
+    METHOD_MISMATCH,
+    PATH_MISMATCH,
+    MEDIA_TYPE_MISSING,
+    MEDIA_TYPE_MALFORMED,
+    MEDIA_TYPE_MISMATCH,
+    BODY_SIZE_MISMATCH,
+    BODY_SHA256_MISMATCH,
+    BODY_INCOMPLETE,
+    BODY_LIMIT_EXCEEDED,
+}
+
+@Serializable
+data class RequestContractEvaluation(
+    val outcome: RequestContractOutcome,
+    val issues: List<RequestContractIssue> = emptyList(),
+)
+
+@Serializable
 data class ObservedHttpExchange(
     val sequence: Int,
     val hostObservedAt: String,
@@ -70,6 +115,8 @@ data class ObservedHttpExchange(
     val responsePlanIndex: Int? = null,
     val methodComplete: Boolean = true,
     val pathComplete: Boolean = true,
+    val requestContract: RequestContractEvaluation =
+        RequestContractEvaluation(RequestContractOutcome.NOT_EVALUATED),
 )
 
 fun interface MockServerStarter {
@@ -98,6 +145,11 @@ class DeterministicMockServer(private val clock: Clock = Clock.systemUTC()) : Mo
         plan.responses.forEach { response ->
             require(response.body.toByteArray(StandardCharsets.UTF_8).size.toLong() <= limits.responseBodyLimitBytes) {
                 "Planned response body exceeds the configured response-body limit."
+            }
+        }
+        plan.expectedRequest?.let { expected ->
+            require(expected.bodyBytes.size.toLong() <= limits.requestBodyLimitBytes) {
+                "Expected request body exceeds the configured request-body limit."
             }
         }
         require(limits.maxExchangeCount >= plan.responses.size) {
@@ -179,7 +231,7 @@ private class ServerState(
 
     fun handle(exchange: HttpExchange) {
         exchange.use {
-            val request = readBounded(exchange, limits.requestBodyLimitBytes)
+            val request = readBounded(exchange.requestBody, limits.requestBodyLimitBytes)
             val target =
                 exchange.requestURI.rawPath +
                     exchange.requestURI.rawQuery?.let { query -> "?$query" }.orEmpty()
@@ -187,20 +239,29 @@ private class ServerState(
             val observedTarget = target.take(MAX_TARGET_CHARACTERS)
             val decision =
                 synchronized(lock) {
-                    val selected = decide(exchange.requestMethod, target, request.complete)
+                    val selected = decide(exchange.requestMethod, target, request.observation.complete)
                     exchanges +=
                         ObservedHttpExchange(
                             sequence = selected.sequence,
                             hostObservedAt = clock.instant().toString(),
                             method = observedMethod,
                             path = observedTarget,
-                            requestBody = request,
+                            requestBody = request.observation,
                             responseStatus = selected.status,
                             responseBody = bodyObservation(selected.body, complete = true),
                             matchedResponsePlan = selected.planIndex != null,
                             responsePlanIndex = selected.planIndex,
                             methodComplete = observedMethod.length == exchange.requestMethod.length,
                             pathComplete = observedTarget.length == target.length,
+                            requestContract =
+                                evaluateRequestContract(
+                                    plan,
+                                    limits.requestBodyLimitBytes,
+                                    exchange.requestMethod,
+                                    target,
+                                    exchange.requestHeaders["Content-Type"].orEmpty(),
+                                    request,
+                                ),
                         )
                     selected
                 }
@@ -246,31 +307,86 @@ private data class ResponseDecision(
     val planIndex: Int? = null,
 )
 
-private fun readBounded(
-    exchange: HttpExchange,
+internal data class BoundedBodyRead(
+    internal val bytes: ByteArray,
+    val observation: HttpBodyObservation,
+)
+
+internal fun readBounded(
+    input: InputStream,
     limit: Long,
-): HttpBodyObservation {
+): BoundedBodyRead {
     val output = ByteArrayOutputStream()
     val buffer = ByteArray(8192)
     var complete = true
-    exchange.requestBody.use { input ->
-        while (true) {
-            val count = input.read(buffer)
-            if (count < 0) break
-            val remaining = limit + 1 - output.size().toLong()
-            if (remaining <= 0) {
-                complete = false
-                break
+    try {
+        input.use {
+            while (true) {
+                val count = it.read(buffer)
+                if (count < 0) break
+                val remaining = limit + 1 - output.size().toLong()
+                if (remaining <= 0) {
+                    complete = false
+                    break
+                }
+                val copied = minOf(count.toLong(), remaining).toInt()
+                output.write(buffer, 0, copied)
+                if (copied < count || output.size().toLong() > limit) {
+                    complete = false
+                    break
+                }
             }
-            val copied = minOf(count.toLong(), remaining).toInt()
-            output.write(buffer, 0, copied)
-            if (copied < count || output.size().toLong() > limit) {
-                complete = false
-                break
+        }
+    } catch (_: IOException) {
+        complete = false
+    }
+    val bytes = output.toByteArray()
+    return BoundedBodyRead(bytes, bodyObservation(bytes, complete))
+}
+
+internal fun evaluateRequestContract(
+    plan: MockServerPlan,
+    requestBodyLimitBytes: Long,
+    method: String,
+    target: String,
+    contentTypes: List<String>,
+    request: BoundedBodyRead,
+): RequestContractEvaluation {
+    val expected = plan.expectedRequest ?: return RequestContractEvaluation(RequestContractOutcome.NOT_EVALUATED)
+    val issues = mutableListOf<RequestContractIssue>()
+    if (method != plan.method) issues += RequestContractIssue.METHOD_MISMATCH
+    if (target != plan.path) issues += RequestContractIssue.PATH_MISMATCH
+
+    when {
+        contentTypes.isEmpty() -> issues += RequestContractIssue.MEDIA_TYPE_MISSING
+        contentTypes.size != 1 -> issues += RequestContractIssue.MEDIA_TYPE_MALFORMED
+        else -> {
+            val observed = parseSafeMediaType(contentTypes.single())
+            when {
+                observed == null -> issues += RequestContractIssue.MEDIA_TYPE_MALFORMED
+                observed != expected.parsedMediaType -> issues += RequestContractIssue.MEDIA_TYPE_MISMATCH
             }
         }
     }
-    return bodyObservation(output.toByteArray(), complete)
+
+    if (!request.observation.complete) {
+        issues +=
+            if (request.observation.capturedByteSize > requestBodyLimitBytes) {
+                RequestContractIssue.BODY_LIMIT_EXCEEDED
+            } else {
+                RequestContractIssue.BODY_INCOMPLETE
+            }
+        return RequestContractEvaluation(RequestContractOutcome.NOT_EVALUATED, issues)
+    }
+    if (request.bytes.size != expected.bodyBytes.size) {
+        issues += RequestContractIssue.BODY_SIZE_MISMATCH
+    } else if (!MessageDigest.isEqual(sha256(request.bytes), sha256(expected.bodyBytes))) {
+        issues += RequestContractIssue.BODY_SHA256_MISMATCH
+    }
+    return RequestContractEvaluation(
+        if (issues.isEmpty()) RequestContractOutcome.MATCHED else RequestContractOutcome.MISMATCHED,
+        issues,
+    )
 }
 
 private fun bodyObservation(
@@ -283,14 +399,46 @@ private fun bodyObservation(
         complete = complete,
     )
 
+internal data class ParsedMediaType(
+    val type: String,
+    val subtype: String,
+    val parameters: Map<String, String>,
+)
+
+internal fun parseSupportedJsonMediaType(value: String): ParsedMediaType? {
+    val parsed = parseSafeMediaType(value) ?: return null
+    return parsed.takeIf { it.type == "application" && it.subtype == "json" }
+}
+
+private fun parseSafeMediaType(value: String): ParsedMediaType? {
+    if (value.length !in 1..MAX_MEDIA_TYPE_CHARACTERS || value.any { it == '\r' || it == '\n' }) return null
+    val match = JSON_MEDIA_TYPE_PATTERN.matchEntire(value) ?: return null
+    val type = match.groupValues[1].lowercase(Locale.ROOT)
+    val subtype = match.groupValues[2].lowercase(Locale.ROOT)
+    val parameterName = match.groupValues[3]
+    if (parameterName.isEmpty()) return ParsedMediaType(type, subtype, emptyMap())
+    if (!parameterName.equals("charset", ignoreCase = true)) return null
+    val parameterValue = match.groupValues[4]
+    if (!parameterValue.equals("utf-8", ignoreCase = true)) return null
+    return ParsedMediaType(type, subtype, mapOf("charset" to "utf-8"))
+}
+
+private fun sha256(bytes: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").digest(bytes)
+
 private const val MAX_RESPONSES = 16
 private const val MAX_EXCHANGES = 64
 private const val MAX_METHOD_CHARACTERS = 32
 private const val MAX_TARGET_CHARACTERS = 2048
 private const val MAX_BODY_BYTES = 1024L * 1024L
+private const val MAX_MEDIA_TYPE_CHARACTERS = 128
 private const val STOP_TIMEOUT_SECONDS = 5L
 private const val JSON_MEDIA_TYPE = "application/json"
 private val EMPTY_BODY = ByteArray(0)
 private val SUPPORTED_METHODS = setOf("POST")
 private val MEDIA_TYPE = Regex("[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+")
+private val JSON_MEDIA_TYPE_PATTERN =
+    Regex(
+        "([A-Za-z0-9!#$&^_.+-]+)/([A-Za-z0-9!#$&^_.+-]+)" +
+            "(?:[\\t ]*;[\\t ]*([A-Za-z0-9!#$&^_.+-]+)[\\t ]*=[\\t ]*([A-Za-z0-9!#$&^_.+-]+))?",
+    )
 private val IPV4_LOOPBACK = InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1))

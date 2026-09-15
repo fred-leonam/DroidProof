@@ -29,6 +29,8 @@ tasks.test {
         rootProject.layout.projectDirectory.file("samples/smoke-app/scenarios/interactive-passing.json"),
         rootProject.layout.projectDirectory.file("samples/smoke-app/scenarios/interactive-failing.json"),
         rootProject.layout.projectDirectory.file("samples/smoke-app/scenarios/network-passing.json"),
+        rootProject.layout.projectDirectory.file("samples/smoke-app/scenarios/network-request-passing.json"),
+        rootProject.layout.projectDirectory.file("samples/smoke-app/scenarios/network-request-failing.json"),
     )
     systemProperty("droidproof.repositoryRoot", rootProject.layout.projectDirectory.asFile.absolutePath)
 }

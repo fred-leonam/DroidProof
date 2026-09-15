@@ -4,6 +4,7 @@ import io.github.fredleonam.droidproof.evidence.EvidenceFileInput
 import io.github.fredleonam.droidproof.evidence.Sha256Calculator
 import io.github.fredleonam.droidproof.mockserver.MockServerStarter
 import io.github.fredleonam.droidproof.mockserver.ObservedHttpExchange
+import io.github.fredleonam.droidproof.mockserver.RequestContractOutcome
 import io.github.fredleonam.droidproof.mockserver.RunningMockServer
 import io.github.fredleonam.droidproof.model.BundleRelativePath
 import io.github.fredleonam.droidproof.model.EventId
@@ -39,7 +40,7 @@ internal class NetworkSessionManager(
     private val serverStarter: MockServerStarter,
 ) {
     fun start(
-        plan: ScenarioBackendPlan,
+        plan: BackendPlanDefinition,
         serial: String,
         timeoutMillis: Long,
     ): NetworkStartResult {
@@ -80,7 +81,7 @@ internal class NetworkSessionManager(
 internal class ActiveNetworkSession(
     private val device: SmokeDeviceOperations,
     private val server: RunningMockServer,
-    private val plan: ScenarioBackendPlan,
+    private val plan: BackendPlanDefinition,
     private val serial: String,
 ) {
     fun finish(
@@ -130,19 +131,35 @@ internal class ActiveNetworkSession(
                     exchange.path,
                     exchange.responseStatus,
                     destination,
+                    exchange.requestContract.outcome,
                 )
             events += exchange.timelineEvent(destination)
         }
-        val matched = matchesPlan(exchanges)
+        val requestCollectionUnavailable =
+            plan.mockServerExpectedRequest != null &&
+                exchanges.any { it.requestContract.outcome == RequestContractOutcome.NOT_EVALUATED }
+        val matched = !requestCollectionUnavailable && matchesPlan(exchanges)
+        val outcome =
+            when {
+                requestCollectionUnavailable -> NetworkEvaluationOutcome.NOT_EVALUATED
+                matched -> NetworkEvaluationOutcome.MATCHED
+                else -> NetworkEvaluationOutcome.MISMATCHED
+            }
         return NetworkFinishResult(
             evaluation =
                 NetworkEvaluationDocument(
-                    if (matched) NetworkEvaluationOutcome.MATCHED else NetworkEvaluationOutcome.MISMATCHED,
+                    outcome,
                     plan.responsePlan.size,
                     exchanges.size,
                     summaries,
-                    if (matched) {
-                        "The controlled server observed the complete ordered backend response plan."
+                    if (requestCollectionUnavailable) {
+                        "At least one request contract could not be evaluated from a complete bounded request observation."
+                    } else if (matched) {
+                        if (plan.mockServerExpectedRequest == null) {
+                            "The controlled server observed the complete ordered backend response plan."
+                        } else {
+                            "The controlled server observed matching request contracts and the complete ordered backend response plan."
+                        }
                     } else {
                         "The controlled server observation did not match the expected request/response sequence."
                     },
@@ -158,6 +175,7 @@ internal class ActiveNetworkSession(
             exchanges.zip(plan.responsePlan).withIndex().all { (zeroBased, pair) ->
                 val (observed, expected) = pair
                 val expectedResponse = expected.body.toByteArray(StandardCharsets.UTF_8)
+                val expectedRequest = plan.mockServerExpectedRequest?.bodyBytesForHost()
                 observed.sequence == zeroBased + 1 &&
                     observed.matchedResponsePlan &&
                     observed.responsePlanIndex == zeroBased + 1 &&
@@ -170,9 +188,21 @@ internal class ActiveNetworkSession(
                     observed.responseBody.sha256 ==
                     Sha256Calculator.calculate(ByteArrayInputStream(expectedResponse)).value &&
                     observed.requestBody.complete &&
-                    observed.responseBody.complete
+                    observed.responseBody.complete &&
+                    (
+                        expectedRequest == null ||
+                            (
+                                observed.requestContract.outcome == RequestContractOutcome.MATCHED &&
+                                    observed.requestBody.capturedByteSize == expectedRequest.size.toLong() &&
+                                    observed.requestBody.sha256 ==
+                                    Sha256Calculator.calculate(ByteArrayInputStream(expectedRequest)).value
+                            )
+                    )
             }
 }
+
+private fun io.github.fredleonam.droidproof.mockserver.ExpectedHttpRequest.bodyBytesForHost(): ByteArray =
+    body.toByteArray(StandardCharsets.UTF_8)
 
 private fun ObservedHttpExchange.timelineEvent(path: BundleRelativePath): TimelineEvent =
     TimelineEvent(
@@ -186,6 +216,11 @@ private fun ObservedHttpExchange.timelineEvent(path: BundleRelativePath): Timeli
                 "path" to this.path,
                 "responseStatus" to responseStatus.toString(),
                 "serverSequence" to sequence.toString(),
+                "requestBytes" to requestBody.capturedByteSize.toString(),
+                "requestSha256" to requestBody.sha256,
+                "requestComplete" to requestBody.complete.toString(),
+                "requestContractOutcome" to requestContract.outcome.name,
+                "requestContractIssues" to requestContract.issues.joinToString(",") { it.name },
             ),
         evidence = listOf(EvidenceReference(path, "application/json")),
     )

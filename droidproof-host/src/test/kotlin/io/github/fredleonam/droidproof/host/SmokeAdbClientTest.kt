@@ -50,7 +50,19 @@ class SmokeAdbClientTest {
     @Test
     fun `package inspection preserves split paths and rejects unsafe output`() {
         var output = "package:/data/app/one/base.apk\npackage:/data/app/two/base.apk\n"
-        val client = SmokeAdbClient(Path.of("/fake/adb"), CommandRunner { CommandResult(stdout = output) })
+        val requests = mutableListOf<CommandRequest>()
+        val client =
+            SmokeAdbClient(
+                Path.of("/fake/adb"),
+                CommandRunner {
+                    requests += it
+                    if ("list" in it.arguments) {
+                        CommandResult(stdout = "package:io.droidproof.smoke\n")
+                    } else {
+                        CommandResult(stdout = output)
+                    }
+                },
+            )
 
         val split = client.packagePaths("emulator-5554", "io.droidproof.smoke", 1000)
         output = "package:../../host.apk\n"
@@ -58,6 +70,37 @@ class SmokeAdbClientTest {
 
         assertEquals(2, split.value?.paths?.size)
         assertEquals(DeviceFailureKind.INVALID_OUTPUT, unsafe.failure)
+        assertEquals(
+            listOf(
+                "/fake/adb", "-s", "emulator-5554", "shell", "pm", "list", "packages", "--user", "0",
+                "io.droidproof.smoke",
+            ),
+            requests[0].arguments,
+        )
+        assertEquals(
+            listOf("/fake/adb", "-s", "emulator-5554", "shell", "pm", "path", "io.droidproof.smoke"),
+            requests[1].arguments,
+        )
+    }
+
+    @Test
+    fun `absent package is detected before platform-specific pm path failure`() {
+        val requests = mutableListOf<CommandRequest>()
+        val client =
+            SmokeAdbClient(
+                Path.of("/fake/adb"),
+                CommandRunner {
+                    requests += it
+                    CommandResult()
+                },
+            )
+
+        val result = client.packagePaths("emulator-5554", "io.droidproof.smoke", 1000)
+
+        assertTrue(result.isSuccessful)
+        assertTrue(requireNotNull(result.value).paths.isEmpty())
+        assertEquals(1, requests.size)
+        assertTrue("list" in requests.single().arguments)
     }
 
     @Test
@@ -175,7 +218,7 @@ class SmokeAdbClientTest {
                 Path.of("/fake/adb"),
                 CommandRunner {
                     requests += it
-                    CommandResult()
+                    if ("--remove" in it.arguments) CommandResult() else CommandResult(stdout = "38637\n")
                 },
             )
 

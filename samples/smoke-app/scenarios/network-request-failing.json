@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 4,
+  "scenarioId": "smoke-network-request-failing",
+  "expectedPackage": "io.github.fredleonam.droidproof.smokeapp",
+  "launchComponent": "io.github.fredleonam.droidproof.smokeapp/io.github.fredleonam.droidproof.smokeapp.MainActivity",
+  "backendPlan": {
+    "devicePort": 38637,
+    "method": "POST",
+    "path": "/orders",
+    "requestBodyLimitBytes": 4096,
+    "responseBodyLimitBytes": 4096,
+    "expectedRequest": {
+      "mediaType": "application/json; charset=utf-8",
+      "body": "{\"customer\":\"WrongCustomer\"}"
+    },
+    "responsePlan": [
+      {
+        "status": 503,
+        "body": "{\"error\":\"retry\"}"
+      },
+      {
+        "status": 201,
+        "body": "{\"orderId\":\"order-42\"}"
+      }
+    ]
+  },
+  "steps": [
+    {
+      "type": "typeTextUiNode",
+      "resourceId": "io.github.fredleonam.droidproof.smokeapp:id/name",
+      "text": "DroidProof42"
+    },
+    {
+      "type": "tapUiNode",
+      "resourceId": "io.github.fredleonam.droidproof.smokeapp:id/order_action"
+    },
+    {
+      "type": "assertUiNode",
+      "resourceId": "io.github.fredleonam.droidproof.smokeapp:id/status",
+      "text": "Order order-42 created",
+      "deadlineMillis": 15000,
+      "pollIntervalMillis": 250
+    }
+  ]
+}

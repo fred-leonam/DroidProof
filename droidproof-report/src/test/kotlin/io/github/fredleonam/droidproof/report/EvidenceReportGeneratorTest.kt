@@ -94,6 +94,12 @@ class EvidenceReportGeneratorTest {
             "Network",
             "POST",
             "/orders",
+            "Request contract",
+            "MATCHED",
+            "Request bytes",
+            "27",
+            "Request SHA-256",
+            "0123456789abcdef",
             "network/exchanges/001.json",
             "screenshots/display.png",
             "image/png",
@@ -171,6 +177,24 @@ class EvidenceReportGeneratorTest {
         assertContainsAll(html, "Bundle verification failed", "network/exchanges/001.json")
         assertFalse(html.contains("<h2>Network</h2>"))
         assertFalse(html.contains("/orders"))
+    }
+
+    @Test
+    fun `verified request contract mismatch is explained without rendering body bytes`() {
+        val bundle =
+            writeV3Bundle(
+                "request-mismatch",
+                requestContractOutcome = "MISMATCHED",
+                requestContractIssues = "BODY_SHA256_MISMATCH",
+            )
+        val report = directory.resolve("request-mismatch.html")
+
+        generator.generate(bundle, report)
+        val html = report.readText()
+
+        assertContainsAll(html, "MISMATCHED", "BODY_SHA256_MISMATCH", "Request bytes", "Request SHA-256")
+        assertFalse(html.contains("DroidProof42"))
+        assertFalse(html.contains("customer"))
     }
 
     @Test
@@ -315,6 +339,8 @@ class EvidenceReportGeneratorTest {
         status: ExecutionStatus = ExecutionStatus.COMPLETED,
         verdict: ScenarioVerdict = ScenarioVerdict.PASSED,
         completeness: EvidenceCompleteness = EvidenceCompleteness.COMPLETE,
+        requestContractOutcome: String = "MATCHED",
+        requestContractIssues: String = "",
     ): Path {
         val result = source("$name-result.json", "{}\n")
         val binding = source("$name-binding.json", "{}\n")
@@ -406,6 +432,10 @@ class EvidenceReportGeneratorTest {
                                 "serverSequence" to "1",
                                 "method" to if (hostile) "POST<script>" else "POST",
                                 "path" to if (hostile) "/orders?x=<script>&y='value'" else "/orders",
+                                "requestContractOutcome" to requestContractOutcome,
+                                "requestContractIssues" to requestContractIssues,
+                                "requestBytes" to "27",
+                                "requestSha256" to "0123456789abcdef",
                                 "responseStatus" to "201",
                             ),
                             listOf(EvidenceReference(BundleRelativePath("network/exchanges/001.json"), "application/json")),

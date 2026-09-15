@@ -1,5 +1,6 @@
 package io.github.fredleonam.droidproof.host
 
+import io.github.fredleonam.droidproof.mockserver.RequestContractOutcome
 import io.github.fredleonam.droidproof.model.BundleRelativePath
 import io.github.fredleonam.droidproof.model.EvidenceCompleteness
 import io.github.fredleonam.droidproof.model.ExecutionStatus
@@ -76,6 +77,7 @@ data class NetworkExchangeSummary(
     val path: String,
     val responseStatus: Int,
     val evidencePath: BundleRelativePath,
+    val requestContractOutcome: RequestContractOutcome = RequestContractOutcome.NOT_EVALUATED,
 )
 
 @Serializable
