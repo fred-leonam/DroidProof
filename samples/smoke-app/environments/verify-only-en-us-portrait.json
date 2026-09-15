@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "locale": "en-US",
+  "orientation": "PORTRAIT",
+  "animations": {
+    "windowScale": 0.0,
+    "transitionScale": 0.0,
+    "animatorScale": 0.0
+  }
+}
