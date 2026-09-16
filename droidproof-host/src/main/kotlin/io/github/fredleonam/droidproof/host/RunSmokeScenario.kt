@@ -11,7 +11,7 @@ import io.github.fredleonam.droidproof.model.EnvironmentExecutionMode
 import java.nio.file.Path
 
 fun main(args: Array<String>) {
-    require(args.size == 11) { "Expected smoke-scenario task configuration arguments." }
+    require(args.size == 12) { "Expected smoke-scenario task configuration arguments." }
     require(args[1].isNotBlank()) { "Set -Pdroidproof.apkPath to one local APK." }
     require(args[2].isNotBlank()) { "Set -Pdroidproof.scenarioPath to one local scenario JSON document." }
     require(args[3].isNotBlank()) { "Set -Pdroidproof.deviceSerial to an authorized test emulator serial." }
@@ -42,6 +42,7 @@ fun main(args: Array<String>) {
                 BundlePublisher { request, destination ->
                     EvidenceBundleWriter().write(request, destination, signing = signing)
                 },
+            recoveryJournalStore = FileEmulatorRecoveryJournalStore(Path.of(args[10])),
         ).run(
             SmokeRunRequest(
                 apkPath = Path.of(args[1]),
@@ -58,7 +59,7 @@ fun main(args: Array<String>) {
                         },
                     ) { "droidproof.environmentMode must be VERIFY_ONLY or APPLY_AND_RESTORE." },
                 replaceExisting = replaceExisting,
-                droidProofVersion = DroidProofVersion(args[10]),
+                droidProofVersion = DroidProofVersion(args[11]),
             ),
         )
     val location = result.output ?: result.diagnostic

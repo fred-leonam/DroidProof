@@ -98,6 +98,8 @@ class SmokeCoordinator(
     private val mockServerStarter: MockServerStarter = DeterministicMockServer(wallClock),
     private val idSource: () -> String = { UUID.randomUUID().toString() },
     private val leaseProvider: EmulatorExecutionLeaseProvider = FileEmulatorExecutionLeaseProvider(),
+    private val recoveryJournalStore: EmulatorRecoveryJournalStore =
+        FileEmulatorRecoveryJournalStore(Path.of(System.getProperty("user.home"), ".droidproof", "recovery")),
 ) {
     fun run(request: SmokeRunRequest): SmokeRunResult {
         val startedAt = wallClock.instant().toString()
@@ -109,6 +111,7 @@ class SmokeCoordinator(
         val state = MutableExecutionState(startedAt) { wallClock.instant().toString() }
         var lease: EmulatorExecutionLease? = null
         var capabilities: EmulatorCapabilityObservationV1? = null
+        var recoveryJournal: EmulatorRecoveryJournalV1? = null
 
         try {
             var accepted: AcceptedInputs? = null
@@ -131,6 +134,17 @@ class SmokeCoordinator(
                 val capability = device.probeCapabilities(request.deviceSerial, operationTimeout(request, state))
                 if (!capability.isSuccessful) abort(capability.detail ?: "Emulator capability observation failed.", capability.failure)
                 capabilities = requireNotNull(capability.value)
+                if (request.environmentMode == EnvironmentExecutionMode.APPLY_AND_RESTORE) {
+                    val existing = recoveryJournalStore.load(request.deviceSerial)
+                    if (existing != null && !existing.isResolved) {
+                        abort(
+                            "An unresolved emulator recovery journal exists at ${recoveryJournalStore.pathFor(
+                                request.deviceSerial,
+                            ).fileName}; run recoverEmulatorEnvironment with this explicit serial.",
+                            null,
+                        )
+                    }
+                }
             }
             val inputs = accepted
 
@@ -150,6 +164,25 @@ class SmokeCoordinator(
                             )
                         }
                         originalEnvironment = requireNotNull(snapshot.value)
+                        val prepared =
+                            EmulatorRecoveryJournalV1(
+                                transactionId = executionId,
+                                deviceSerial = request.deviceSerial,
+                                initialCapability = requireNotNull(capabilities),
+                                originalEnvironment = requireNotNull(originalEnvironment),
+                                phase = RecoveryJournalPhase.PREPARED,
+                                createdAt = startedAt,
+                                updatedAt = wallClock.instant().toString(),
+                                detail = "Original environment captured before mutation.",
+                            )
+                        // This durable boundary is intentionally before the first environment write.
+                        recoveryJournalStore.save(prepared)
+                        recoveryJournal =
+                            prepared.transition(
+                                RecoveryJournalPhase.MUTATION_STARTED,
+                                wallClock.instant().toString(),
+                                "Environment mutation is about to start.",
+                            ).also(recoveryJournalStore::save)
                         environmentTransaction =
                             EnvironmentTransactionDocument(
                                 mode = request.environmentMode,
@@ -207,6 +240,12 @@ class SmokeCoordinator(
                                 requestedVerification = EnvironmentEvaluationOutcome.MATCHED,
                                 detail = "Requested environment was verified before scenario execution.",
                             )
+                        recoveryJournal =
+                            requireNotNull(recoveryJournal).transition(
+                                RecoveryJournalPhase.APPLIED_VERIFIED,
+                                wallClock.instant().toString(),
+                                "Requested environment was verified.",
+                            ).also(recoveryJournalStore::save)
                     }
                 }
             } else {
@@ -403,6 +442,18 @@ class SmokeCoordinator(
             if (originalEnvironment != null) {
                 stage<Unit>(state, ExecutionStage.ENVIRONMENT_RESTORE) {
                     // Do not honor cooperative cancellation here: rollback has a separate bounded timeout.
+                    var restorationJournalRecorded = true
+                    try {
+                        recoveryJournal =
+                            requireNotNull(recoveryJournal).transition(
+                                RecoveryJournalPhase.RESTORATION_STARTED,
+                                wallClock.instant().toString(),
+                                "Environment restoration started.",
+                            ).also(recoveryJournalStore::save)
+                    } catch (error: Exception) {
+                        markRecoveryRequired(recoveryJournal, "Recovery journal finalization failed.")
+                        restorationJournalRecorded = false
+                    }
                     val restored =
                         device.restoreEnvironment(request.deviceSerial, originalEnvironment!!, request.commandTimeoutMillis)
                     if (!restored.isSuccessful) {
@@ -412,6 +463,7 @@ class SmokeCoordinator(
                                 restorationOutcome = EnvironmentRestorationOutcome.RESTORE_UNAVAILABLE,
                                 detail = restored.detail ?: "Environment restoration was unavailable.",
                             )
+                        markRecoveryRequired(recoveryJournal, "Environment restoration failed.")
                         throw RunAbort(requireNotNull(environmentTransaction).detail)
                     }
                     val observed = device.snapshotEnvironment(request.deviceSerial, request.commandTimeoutMillis)
@@ -435,7 +487,24 @@ class SmokeCoordinator(
                                     "Original low-level environment state could not be verified after restoration."
                                 },
                         )
-                    if (!matches) throw RunAbort(requireNotNull(environmentTransaction).detail)
+                    if (!matches) {
+                        markRecoveryRequired(recoveryJournal, "Environment restoration could not be verified.")
+                        throw RunAbort(requireNotNull(environmentTransaction).detail)
+                    }
+                    try {
+                        if (!restorationJournalRecorded) {
+                            throw RecoveryJournalException("Recovery journal restoration phase was not durable.")
+                        }
+                        recoveryJournal =
+                            requireNotNull(recoveryJournal).transition(
+                                RecoveryJournalPhase.RESTORED_VERIFIED,
+                                wallClock.instant().toString(),
+                                "Original environment was restored and verified.",
+                            ).also(recoveryJournalStore::save)
+                    } catch (error: Exception) {
+                        markRecoveryRequired(recoveryJournal, "Recovery journal finalization failed.")
+                        throw error
+                    }
                 }
             } else if (inputs?.environment != null) {
                 environmentTransaction =
@@ -493,6 +562,18 @@ class SmokeCoordinator(
             return result
         } finally {
             lease?.close()
+        }
+    }
+
+    private fun markRecoveryRequired(
+        journal: EmulatorRecoveryJournalV1?,
+        detail: String,
+    ) {
+        if (journal == null || journal.isResolved) return
+        runCatching {
+            recoveryJournalStore.save(
+                journal.transition(RecoveryJournalPhase.RECOVERY_REQUIRED, wallClock.instant().toString(), detail),
+            )
         }
     }
 

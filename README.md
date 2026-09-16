@@ -44,7 +44,7 @@ For an environment contract the live order is cooperative lease, emulator/user p
 
 Capability and continuity evidence are inventoried at `environment/capabilities.json` and `environment/continuity.json` and timeline-linked. The offline report renders them only after complete bundle integrity verification and escapes all values. Image metadata is an observation, not image provenance; boot ID is a bounded continuity signal, not remote attestation. The cooperative lease cannot prevent Android Studio, people, or arbitrary ADB processes from changing an emulator, and sequential observations do not prove uninterrupted stability.
 
-The next recommended milestone is crash-resilient, operator-visible recovery guidance for interrupted environment transactions; it must not claim deterministic provisioning, exclusive emulator ownership, continuous monitoring, image provenance, or remote attestation.
+Recovery-journal schema v1 is separate from evidence schemas. It retains only the data needed to restore an interrupted `APPLY_AND_RESTORE` transaction.
 
 `authenticity.json` is a reserved core file rather than ordinary inventoried evidence. It records Ed25519, the SHA-256-derived key ID of the X.509/SPKI public key, exact byte sizes and SHA-256 values for `manifest.json` and `timeline.json`, and a Base64 signature over a deterministic domain-separated message. The bundle does not contain a public key. Trust is established only when the caller supplies a public key from outside the bundle.
 
@@ -182,7 +182,18 @@ bundle/
 
 Each network exchange document comes from the actual controlled server observation and contains a host observation timestamp, server sequence, bounded method/path, bounded request and response body metadata, response status, response-plan match metadata, and a request-contract outcome of `MATCHED`, `MISMATCHED`, or `NOT_EVALUATED`. Deterministic issue codes distinguish wrong method/path/media type, body size/hash differences, incomplete reads, and limit excess. Request and response bodies are not copied into exchange documents; the configured expected request and responses remain in the exact scenario evidence. Every network file is inventoried with role `network`, byte size, and SHA-256, and every server event links to its file from the canonical timeline.
 
-`VERIFY_ONLY` is the default and performs no mutation. `APPLY_AND_RESTORE` requires both `-Pdroidproof.environmentPath=...` and `-Pdroidproof.environmentMode=APPLY_AND_RESTORE`: it snapshots locale, exact user-0 rotation settings, and the three animation scales; applies the narrow contract; requires a matched post-apply evaluation before artifact binding; then restores and verifies the exact snapshot. Its integrity-bound `environment/transaction.json` is rendered only after bundle verification. Restore mismatch or unavailable evidence makes the execution unsuccessful. Locale uses `cmd locale set`; unsupported emulator images return an explicit unavailable result. This is not deterministic provisioning and cannot recover from SIGKILL, host power loss, emulator crash, permanent ADB loss, or external concurrent mutation.
+`VERIFY_ONLY` is the default and performs no mutation. `APPLY_AND_RESTORE` requires both `-Pdroidproof.environmentPath=...` and `-Pdroidproof.environmentMode=APPLY_AND_RESTORE`: it snapshots locale, exact user-0 rotation settings, and the three animation scales; writes a strict external recovery journal before mutation; applies the narrow contract; requires a matched post-apply evaluation before artifact binding; then restores and verifies the exact snapshot. Its integrity-bound `environment/transaction.json` is rendered only after bundle verification; the recovery journal is never put in that completed bundle.
+
+The journal root is `droidproof-host/.droidproof-recovery` by default and is changed with `-Pdroidproof.recoveryStateRoot=/absolute/state/root`. Its filename is a SHA-256 digest of the validated serial. An unresolved journal blocks an ordinary `APPLY_AND_RESTORE` run after read-only preflight/capability observation; it is never silently restored. Recover explicitly with the same authorized serial:
+
+```bash
+./gradlew :droidproof-host:recoverEmulatorEnvironment \
+  -Pdroidproof.deviceSerial="$DROIDPROOF_EMULATOR_SERIAL" \
+  -Pdroidproof.adbPath=/absolute/path/to/Android/Sdk/platform-tools/adb \
+  -Pdroidproof.recoveryStateRoot=/absolute/state/root
+```
+
+Recovery refuses automatic writes unless the saved API level, build fingerprint, and boot identifier exactly match a fresh observation. It retains the journal and prints bounded manual restoration values on drift or unavailable identity. Restore mismatch, journal-finalization failure, or unavailable restoration also leaves a blocking journal. This is not deterministic provisioning and retains limitations around SIGKILL timing, filesystem durability, host power loss, emulator crash, permanent ADB loss, and external concurrent ADB mutation.
 
 Run the intentional v4 failure with the same APK and `network-request-failing.json`. It keeps the UI input and application behavior unchanged but expects `{"customer":"WrongCustomer"}`. The app still reaches `Order order-42 created`; both observed requests are reported as mismatches, the execution is `COMPLETED`, the scenario verdict is `FAILED`, and the Gradle task exits nonzero because the success criteria were deliberately not met:
 
@@ -250,6 +261,7 @@ See [ADR 0008](docs/adr/0008-deterministic-network-evidence.md), [ADR 0009](docs
 | Artifact-bound host smoke execution | Implemented for one APK, one selected emulator, and primary user 0 |
 | Emulator environment contract | VERIFY_ONLY default; explicit APPLY_AND_RESTORE exact snapshot, verification, and bounded restoration for the narrow v1 fields |
 | Cooperative emulator execution lease | Implemented: non-blocking serial-scoped, same-host DroidProof-process exclusion through cleanup and environment rollback |
+| Interrupted environment recovery | Implemented: strict external serial-digest journal, normal-run blocking, and explicit identity-gated recovery |
 | Environment evidence and verified report section | Evaluation and integrity-bound transaction documents with timeline binding |
 | Ordered View-based UI text/tap/assert | Implemented narrow resource-ID/exact-text slice |
 | Deterministic loopback mock server and ADB reverse | Implemented for `POST /orders` ordered responses |
@@ -264,7 +276,7 @@ See [ADR 0008](docs/adr/0008-deterministic-network-evidence.md), [ADR 0009](docs
 | Published Gradle plugin, general CLI, or general-purpose scenario DSL | Not implemented |
 | PKI, certificate chains, revocation, timestamping, transparency, KMS/HSM, or remote attestation | Not implemented |
 
-The lease is not exclusive ownership of the emulator: Android Studio, people, arbitrary ADB, non-cooperating processes, other hosts, crashes, and SIGKILL remain outside its guarantee. The next recommended milestone is narrow emulator-image capability probing before mutation and stronger external-mutation detection; neither is provisioning or remote attestation.
+The lease is not exclusive ownership of the emulator: Android Studio, people, arbitrary ADB, non-cooperating processes, other hosts, crashes, and SIGKILL remain outside its guarantee. The next recommended milestone is bounded detection and operator reporting of external mutation during a live transaction; it is neither provisioning nor remote attestation.
 
 ## Architecture decisions
 
@@ -281,3 +293,5 @@ The lease is not exclusive ownership of the emulator: Android Studio, people, ar
 - [ADR 0011](docs/adr/0011-emulator-environment-contract.md): verify-only locale, orientation, and animation precondition
 - [ADR 0012](docs/adr/0012-transactional-emulator-environment-application-and-restoration.md): opt-in application and exact restoration
 - [ADR 0013](docs/adr/0013-cooperative-emulator-execution-lease.md): cooperative same-host serial execution lease
+- [ADR 0014](docs/adr/0014-emulator-capability-and-continuity-observation.md): emulator capability and continuity observation
+- [ADR 0015](docs/adr/0015-crash-resilient-environment-recovery-journal.md): crash-resilient environment recovery journal
