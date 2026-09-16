@@ -20,6 +20,7 @@ import io.github.fredleonam.droidproof.model.BundleRelativePath
 import io.github.fredleonam.droidproof.model.DroidProofVersion
 import io.github.fredleonam.droidproof.model.EmulatorEnvironmentEvaluationV1
 import io.github.fredleonam.droidproof.model.EnvironmentEvaluationOutcome
+import io.github.fredleonam.droidproof.model.EnvironmentExecutionMode
 import io.github.fredleonam.droidproof.model.EvidenceBundleManifestV3
 import io.github.fredleonam.droidproof.model.EvidenceCompleteness
 import io.github.fredleonam.droidproof.model.EvidenceFileRole
@@ -591,6 +592,7 @@ class SmokeCoordinatorTest {
         monotonicClock: FakeMonotonicClock = FakeMonotonicClock(),
         assertion: UiAssertionRunner = assertionRunner(device, monotonicClock),
         leaseProvider: EmulatorExecutionLeaseProvider = EmulatorExecutionLeaseProvider { EmulatorExecutionLease {} },
+        recoveryJournalStore: EmulatorRecoveryJournalStore = FileEmulatorRecoveryJournalStore(directory.resolve("recovery")),
     ) = SmokeCoordinator(
         device,
         capture,
@@ -600,7 +602,67 @@ class SmokeCoordinatorTest {
         assertionRunner = assertion,
         idSource = { "run-001" },
         leaseProvider = leaseProvider,
+        recoveryJournalStore = recoveryJournalStore,
     )
+
+    @Test
+    fun `apply and restore persists recovery state before mutation and resolves it after verified rollback`() {
+        val device = FakeSmokeDevice().apply { dumps += DumpResponse(FakeSmokeDevice.MATCHING_XML) }
+        val store = FileEmulatorRecoveryJournalStore(directory.resolve("journal"))
+        val result =
+            coordinator(device, completeCapture(), recoveryJournalStore = store).run(
+                environmentRequest("durable-apply").copy(environmentMode = EnvironmentExecutionMode.APPLY_AND_RESTORE),
+            )
+        assertTrue(result.isSuccessful)
+        assertTrue(
+            device.operations.indexOfFirst { it.startsWith("snapshot:") } < device.operations.indexOfFirst { it.startsWith("apply:") },
+        )
+        assertTrue(device.operations.any { it.startsWith("restore:") })
+        assertEquals(RecoveryJournalPhase.RESTORED_VERIFIED, requireNotNull(store.load("emulator-5554")).phase)
+    }
+
+    @Test
+    fun `journal persistence failure prevents apply mutation`() {
+        val device = FakeSmokeDevice()
+        val store =
+            object : EmulatorRecoveryJournalStore {
+                override fun load(serial: String) = null
+
+                override fun save(journal: EmulatorRecoveryJournalV1): Unit = throw RecoveryJournalException("disk unavailable")
+
+                override fun pathFor(serial: String): Path = directory.resolve("unavailable")
+            }
+        val result =
+            coordinator(device, DeviceEvidenceCapture { error("capture") }, recoveryJournalStore = store).run(
+                environmentRequest("journal-failure").copy(environmentMode = EnvironmentExecutionMode.APPLY_AND_RESTORE),
+            )
+        assertEquals(ExecutionStatus.ERROR, result.document?.status)
+        assertTrue(device.operations.none { it.startsWith("apply:") })
+    }
+
+    @Test
+    fun `unresolved journal blocks ordinary apply and restore execution`() {
+        val device = FakeSmokeDevice()
+        val store = FileEmulatorRecoveryJournalStore(directory.resolve("journal-block"))
+        store.save(
+            EmulatorRecoveryJournalV1(
+                transactionId = "blocked-001",
+                deviceSerial = "emulator-5554",
+                initialCapability = device.capabilityResult.value!!,
+                originalEnvironment = device.snapshotResult.value!!,
+                phase = RecoveryJournalPhase.MUTATION_STARTED,
+                createdAt = "2026-09-12T12:00:00Z",
+                updatedAt = "2026-09-12T12:00:00Z",
+                detail = "Mutation started.",
+            ),
+        )
+        val result =
+            coordinator(device, DeviceEvidenceCapture { error("capture") }, recoveryJournalStore = store).run(
+                environmentRequest("journal-blocked").copy(environmentMode = EnvironmentExecutionMode.APPLY_AND_RESTORE),
+            )
+        assertEquals(ExecutionStatus.ERROR, result.document?.status)
+        assertTrue(device.operations.none { it.startsWith("snapshot:") || it.startsWith("apply:") || it.startsWith("restore:") })
+    }
 
     @Test
     fun `text flow preserves exact operation order and integrity bound evidence`() {

@@ -53,8 +53,25 @@ tasks.register<JavaExec>("runSmokeScenario") {
         "signingPublicKeyPath" to "",
         "environmentPath" to "",
         "environmentMode" to "VERIFY_ONLY",
+        "recoveryStateRoot" to layout.projectDirectory.dir(".droidproof-recovery").asFile.absolutePath,
     )) {
         args(providers.gradleProperty("droidproof.$name").orElse(default).get())
     }
     args(project.version.toString())
+}
+
+tasks.register<JavaExec>("recoverEmulatorEnvironment") {
+    group = "droidproof"
+    description = "Explicitly restores a durable interrupted emulator-environment transaction."
+    classpath = sourceSets.main.get().runtimeClasspath
+    mainClass.set("io.github.fredleonam.droidproof.host.RecoverEmulatorEnvironmentKt")
+    outputs.upToDateWhen { false }
+    outputs.cacheIf { false }
+    args(providers.gradleProperty("droidproof.deviceSerial").orElse("").get())
+    args(providers.gradleProperty("droidproof.adbPath").orElse("").get())
+    args(
+        providers.gradleProperty("droidproof.recoveryStateRoot")
+            .orElse(layout.projectDirectory.dir(".droidproof-recovery").asFile.absolutePath)
+            .get(),
+    )
 }
