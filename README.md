@@ -240,7 +240,8 @@ See [ADR 0008](docs/adr/0008-deterministic-network-evidence.md), [ADR 0009](docs
 | Ed25519 bundle signing and external-key authentication | Implemented with authentication envelope v1 and JDK 17 |
 | Read-only device capture | Implemented narrow ADB slice |
 | Artifact-bound host smoke execution | Implemented for one APK, one selected emulator, and primary user 0 |
-| Emulator environment contract | VERIFY_ONLY default; explicit APPLY_AND_RESTORE snapshot, verification, and restoration for the narrow v1 fields |
+| Emulator environment contract | VERIFY_ONLY default; explicit APPLY_AND_RESTORE exact snapshot, verification, and bounded restoration for the narrow v1 fields |
+| Cooperative emulator execution lease | Implemented: non-blocking serial-scoped, same-host DroidProof-process exclusion through cleanup and environment rollback |
 | Environment evidence and verified report section | Evaluation and integrity-bound transaction documents with timeline binding |
 | Ordered View-based UI text/tap/assert | Implemented narrow resource-ID/exact-text slice |
 | Deterministic loopback mock server and ADB reverse | Implemented for `POST /orders` ordered responses |
@@ -255,7 +256,7 @@ See [ADR 0008](docs/adr/0008-deterministic-network-evidence.md), [ADR 0009](docs
 | Published Gradle plugin, general CLI, or general-purpose scenario DSL | Not implemented |
 | PKI, certificate chains, revocation, timestamping, transparency, KMS/HSM, or remote attestation | Not implemented |
 
-The next recommended milestone is stronger process/external ownership coordination and carefully scoped emulator-image capability detection; it must not be mistaken for provisioning or remote attestation.
+The lease is not exclusive ownership of the emulator: Android Studio, people, arbitrary ADB, non-cooperating processes, other hosts, crashes, and SIGKILL remain outside its guarantee. The next recommended milestone is narrow emulator-image capability probing before mutation and stronger external-mutation detection; neither is provisioning or remote attestation.
 
 ## Architecture decisions
 
@@ -271,3 +272,4 @@ The next recommended milestone is stronger process/external ownership coordinati
 - [ADR 0010](docs/adr/0010-authenticated-evidence-bundles.md): optional Ed25519 authentication with an external trust root
 - [ADR 0011](docs/adr/0011-emulator-environment-contract.md): verify-only locale, orientation, and animation precondition
 - [ADR 0012](docs/adr/0012-transactional-emulator-environment-application-and-restoration.md): opt-in application and exact restoration
+- [ADR 0013](docs/adr/0013-cooperative-emulator-execution-lease.md): cooperative same-host serial execution lease

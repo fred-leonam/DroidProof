@@ -17,6 +17,80 @@ class SmokeAdbClientTest {
     lateinit var directory: Path
 
     @Test
+    fun `transaction commands snapshot apply and restore exact state with serial scoped arguments`() {
+        val requests = mutableListOf<CommandRequest>()
+        val client =
+            SmokeAdbClient(
+                Path.of("/fake/adb"),
+                CommandRunner { request ->
+                    requests += request
+                    CommandResult(
+                        stdout =
+                            when (request.arguments.last()) {
+                                "persist.sys.locale" -> "en-US\n"
+                                "accelerometer_rotation" -> "1\n"
+                                "user_rotation" -> "3\n"
+                                "window_animation_scale" -> "0.25\n"
+                                "transition_animation_scale" -> "0.5\n"
+                                "animator_duration_scale" -> "1.0\n"
+                                else -> ""
+                            },
+                    )
+                },
+            )
+        val snapshot = requireNotNull(client.snapshotEnvironment("emulator-5554", 1_000).value)
+        assertEquals("en-US", snapshot.locale)
+        assertEquals(1, snapshot.accelerometerRotation)
+        assertEquals(3, snapshot.userRotation)
+        val contract =
+            io.github.fredleonam.droidproof.model.EmulatorEnvironmentContractV1(
+                1,
+                "en-US",
+                io.github.fredleonam.droidproof.model.Orientation.LANDSCAPE,
+                io.github.fredleonam.droidproof.model.AnimationConfiguration(0.0, 0.5, 1.0),
+            )
+        assertTrue(client.applyEnvironment("emulator-5554", contract, 1_000).isSuccessful)
+        assertTrue(client.restoreEnvironment("emulator-5554", snapshot, 1_000).isSuccessful)
+        assertTrue(requests.all { it.arguments.take(3) == listOf("/fake/adb", "-s", "emulator-5554") })
+        val mutations = requests.drop(6).map { it.arguments.drop(3) }
+        assertEquals(listOf("shell", "cmd", "locale", "set", "en-US"), mutations[0])
+        assertEquals("0", mutations[1].last())
+        assertEquals("1", mutations[2].last())
+        assertEquals(listOf("shell", "cmd", "locale", "set", "en-US"), mutations[6])
+        assertEquals("1", mutations[7].last())
+        assertEquals("3", mutations[8].last())
+        assertEquals(listOf("0.25", "0.5", "1.0"), mutations.drop(9).map { it.last() })
+    }
+
+    @Test
+    fun `transaction fails closed and stops after private command failure`() {
+        val requests = mutableListOf<CommandRequest>()
+        val client =
+            SmokeAdbClient(
+                Path.of("/fake/adb"),
+                CommandRunner { request ->
+                    requests += request
+                    CommandResult(stderr = "private stderr")
+                },
+            )
+        val contract =
+            io.github.fredleonam.droidproof.model.EmulatorEnvironmentContractV1(
+                1,
+                "en-US",
+                io.github.fredleonam.droidproof.model.Orientation.PORTRAIT,
+                io.github.fredleonam.droidproof.model.AnimationConfiguration(0.0, 0.0, 0.0),
+            )
+        val result = client.applyEnvironment("emulator-5554", contract, 1_000)
+        assertEquals(DeviceFailureKind.UNSUPPORTED, result.failure)
+        assertFalse(result.detail.orEmpty().contains("private"))
+        assertEquals(1, requests.size)
+        val malformed =
+            SmokeAdbClient(Path.of("/fake/adb"), CommandRunner { CommandResult(stdout = "NaN\n") })
+                .snapshotEnvironment("emulator-5554", 1_000)
+        assertEquals(DeviceFailureKind.INVALID_OUTPUT, malformed.failure)
+    }
+
+    @Test
     fun `environment observations use serial scoped bounded argument lists and parse supported values`() {
         val requests = mutableListOf<CommandRequest>()
         val client =
