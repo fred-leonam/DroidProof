@@ -6,6 +6,7 @@ import io.github.fredleonam.droidproof.device.CommandResult
 import io.github.fredleonam.droidproof.device.CommandRunner
 import io.github.fredleonam.droidproof.device.DeviceSelector
 import io.github.fredleonam.droidproof.device.ProcessCommandRunner
+import io.github.fredleonam.droidproof.model.EmulatorCapabilityObservationV1
 import io.github.fredleonam.droidproof.model.EmulatorEnvironmentState
 import io.github.fredleonam.droidproof.model.Orientation
 import java.nio.file.Files
@@ -43,6 +44,12 @@ data class DeviceAnimationObservations(
 )
 
 interface SmokeDeviceOperations {
+    fun probeCapabilities(
+        serial: String,
+        timeoutMillis: Long,
+    ): DeviceCall<EmulatorCapabilityObservationV1> =
+        DeviceCall(failure = DeviceFailureKind.UNSUPPORTED, detail = "Capability probing is unsupported by this device implementation.")
+
     fun preflight(
         serial: String,
         timeoutMillis: Long,
@@ -150,6 +157,38 @@ class SmokeAdbClient(
     private val executable: Path,
     private val runner: CommandRunner = ProcessCommandRunner(),
 ) : SmokeDeviceOperations {
+    override fun probeCapabilities(
+        serial: String,
+        timeoutMillis: Long,
+    ): DeviceCall<EmulatorCapabilityObservationV1> {
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
+
+        fun property(name: String): DeviceCall<String> {
+            val result = run(target(serial) + listOf("shell", "getprop", name), remainingMillis(deadline), SETTING_LIMIT_BYTES)
+            if (result.failure != null) return result.failureCall("Emulator capability observation was unavailable.")
+            if (result.stderr.isNotBlank()) return invalidObservation("Emulator capability output was unsupported.")
+            return singleSafeLine(result.stdout)?.let(::DeviceCall) ?: invalidObservation("Emulator capability output was unsupported.")
+        }
+        val api = property("ro.build.version.sdk")
+        val fingerprint = property("ro.build.fingerprint")
+        val boot = property("ro.boot.boot_id")
+        if (!api.isSuccessful) return DeviceCall(failure = api.failure, detail = api.detail)
+        if (!fingerprint.isSuccessful) return DeviceCall(failure = fingerprint.failure, detail = fingerprint.detail)
+        if (!boot.isSuccessful) return DeviceCall(failure = boot.failure, detail = boot.detail)
+        return try {
+            DeviceCall(
+                EmulatorCapabilityObservationV1(
+                    apiLevel = api.value!!.toInt(),
+                    buildFingerprint = fingerprint.value!!,
+                    bootIdentifier = boot.value!!,
+                    commandSurfaces = listOf("getprop", "settings", "cmd-locale", "uiautomator-dump"),
+                ),
+            )
+        } catch (_: IllegalArgumentException) {
+            invalidObservation("Emulator capability output was unsupported.")
+        }
+    }
+
     override fun snapshotEnvironment(
         serial: String,
         timeoutMillis: Long,
