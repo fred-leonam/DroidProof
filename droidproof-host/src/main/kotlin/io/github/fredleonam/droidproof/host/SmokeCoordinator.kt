@@ -94,6 +94,7 @@ class SmokeCoordinator(
         UiAssertionRunner(device, monotonicClock = monotonicClock, cancellation = cancellation),
     private val mockServerStarter: MockServerStarter = DeterministicMockServer(wallClock),
     private val idSource: () -> String = { UUID.randomUUID().toString() },
+    private val leaseProvider: EmulatorExecutionLeaseProvider = FileEmulatorExecutionLeaseProvider(),
 ) {
     fun run(request: SmokeRunRequest): SmokeRunResult {
         val startedAt = wallClock.instant().toString()
@@ -103,316 +104,344 @@ class SmokeCoordinator(
         val runDirectory = Files.createTempDirectory(request.outputRoot, "$executionId-")
         val workDirectory = Files.createDirectory(runDirectory.resolve("work"))
         val state = MutableExecutionState(startedAt) { wallClock.instant().toString() }
+        var lease: EmulatorExecutionLease? = null
 
-        var accepted: AcceptedInputs? = null
-        stage<Unit>(state, ExecutionStage.PREFLIGHT) {
-            ensureActive()
-            val scenario = SmokeScenarioLoader.load(request.scenarioPath)
-            val artifact = ArtifactBinder(device, wallClock).snapshot(request.apkPath, workDirectory)
-            val environment = request.environmentPath?.let(EnvironmentContractLoader::load)
-            accepted = AcceptedInputs(scenario, artifact, environment)
-            val overallBudget =
-                scenario.scenario.orderedSteps.filterIsInstance<AssertUiNode>().sumOf { it.deadlineMillis } +
-                    scenario.scenario.orderedSteps.sumOf { it.stepType.deviceOperationCount } * request.commandTimeoutMillis +
-                    request.commandTimeoutMillis * MAX_DEVICE_OPERATIONS +
-                    FINALIZATION_BUDGET_MILLIS
-            state.overallDeadlineNanos =
-                monotonicClock.nanoTime() + TimeUnit.MILLISECONDS.toNanos(overallBudget.coerceAtMost(MAX_OVERALL_BUDGET_MILLIS))
-            val preflight = device.preflight(request.deviceSerial, operationTimeout(request, state))
-            if (!preflight.isSuccessful) abort(preflight.detail ?: "Device preflight failed.", preflight.failure)
-        }
-        val inputs = accepted
-
-        var environmentEvaluation: EmulatorEnvironmentEvaluationV1? = null
-        var environmentTransaction: EnvironmentTransactionDocument? = null
-        var originalEnvironment: EmulatorEnvironmentState? = null
-        if (inputs?.environment != null && state.canUseDevice()) {
-            stage<Unit>(state, ExecutionStage.ENVIRONMENT) {
+        try {
+            var accepted: AcceptedInputs? = null
+            stage<Unit>(state, ExecutionStage.PREFLIGHT) {
                 ensureActive()
-                if (request.environmentMode == EnvironmentExecutionMode.APPLY_AND_RESTORE) {
-                    val snapshot = device.snapshotEnvironment(request.deviceSerial, operationTimeout(request, state))
-                    if (!snapshot.isSuccessful) {
+                val scenario = SmokeScenarioLoader.load(request.scenarioPath)
+                val artifact = ArtifactBinder(device, wallClock).snapshot(request.apkPath, workDirectory)
+                val environment = request.environmentPath?.let(EnvironmentContractLoader::load)
+                accepted = AcceptedInputs(scenario, artifact, environment)
+                lease = leaseProvider.acquire(request.deviceSerial)
+                val overallBudget =
+                    scenario.scenario.orderedSteps.filterIsInstance<AssertUiNode>().sumOf { it.deadlineMillis } +
+                        scenario.scenario.orderedSteps.sumOf { it.stepType.deviceOperationCount } * request.commandTimeoutMillis +
+                        request.commandTimeoutMillis * MAX_DEVICE_OPERATIONS +
+                        FINALIZATION_BUDGET_MILLIS
+                state.overallDeadlineNanos =
+                    monotonicClock.nanoTime() + TimeUnit.MILLISECONDS.toNanos(overallBudget.coerceAtMost(MAX_OVERALL_BUDGET_MILLIS))
+                val preflight = device.preflight(request.deviceSerial, operationTimeout(request, state))
+                if (!preflight.isSuccessful) abort(preflight.detail ?: "Device preflight failed.", preflight.failure)
+            }
+            val inputs = accepted
+
+            var environmentEvaluation: EmulatorEnvironmentEvaluationV1? = null
+            var environmentTransaction: EnvironmentTransactionDocument? = null
+            var originalEnvironment: EmulatorEnvironmentState? = null
+            if (inputs?.environment != null && state.canUseDevice()) {
+                stage<Unit>(state, ExecutionStage.ENVIRONMENT) {
+                    ensureActive()
+                    if (request.environmentMode == EnvironmentExecutionMode.APPLY_AND_RESTORE) {
+                        val snapshot = device.snapshotEnvironment(request.deviceSerial, operationTimeout(request, state))
+                        if (!snapshot.isSuccessful) {
+                            abort(
+                                snapshot.detail ?: "Original emulator environment could not be captured.",
+                                snapshot.failure,
+                            )
+                        }
+                        originalEnvironment = requireNotNull(snapshot.value)
+                        environmentTransaction =
+                            EnvironmentTransactionDocument(
+                                mode = request.environmentMode,
+                                original = originalEnvironment,
+                                detail = "Original environment was observed before mutation.",
+                                restorationOutcome = EnvironmentRestorationOutcome.NOT_ATTEMPTED,
+                            )
+                        val apply =
+                            device.applyEnvironment(
+                                request.deviceSerial,
+                                inputs.environment.contract,
+                                operationTimeout(request, state),
+                            )
+                        environmentTransaction =
+                            requireNotNull(environmentTransaction).copy(
+                                mutationAttempted = true,
+                                detail = "Requested environment mutation was attempted.",
+                            )
+                        if (!apply.isSuccessful) {
+                            abort(
+                                apply.detail ?: "Requested emulator environment could not be applied.",
+                                apply.failure,
+                            )
+                        }
+                    }
+                    val locale = device.observeLocale(request.deviceSerial, operationTimeout(request, state))
+                    if (locale.failure == DeviceFailureKind.CANCELLED) {
+                        abort("Environment observation was cancelled.", locale.failure)
+                    }
+                    ensureActive()
+                    val orientation =
+                        device.observeOrientation(request.deviceSerial, operationTimeout(request, state))
+                    if (orientation.failure == DeviceFailureKind.CANCELLED) {
                         abort(
-                            snapshot.detail ?: "Original emulator environment could not be captured.",
-                            snapshot.failure,
+                            "Environment observation was cancelled.",
+                            orientation.failure,
                         )
                     }
-                    originalEnvironment = requireNotNull(snapshot.value)
-                    environmentTransaction =
-                        EnvironmentTransactionDocument(
-                            mode = request.environmentMode,
-                            original = originalEnvironment,
-                            detail = "Original environment was observed before mutation.",
-                            restorationOutcome = EnvironmentRestorationOutcome.NOT_ATTEMPTED,
+                    ensureActive()
+                    val animations = device.observeAnimations(request.deviceSerial, operationTimeout(request, state))
+                    if (animations.failure == DeviceFailureKind.CANCELLED) {
+                        abort(
+                            "Environment observation was cancelled.",
+                            animations.failure,
                         )
-                    val apply =
-                        device.applyEnvironment(request.deviceSerial, inputs.environment.contract, operationTimeout(request, state))
-                    environmentTransaction =
-                        requireNotNull(environmentTransaction).copy(
-                            mutationAttempted = true,
-                            detail = "Requested environment mutation was attempted.",
-                        )
-                    if (!apply.isSuccessful) abort(apply.detail ?: "Requested emulator environment could not be applied.", apply.failure)
+                    }
+                    environmentEvaluation =
+                        EnvironmentEvaluator.evaluate(inputs.environment.contract, locale, orientation, animations)
+                    if (environmentEvaluation?.outcome != EnvironmentEvaluationOutcome.MATCHED) {
+                        throw RunAbort(requireNotNull(environmentEvaluation).explanation)
+                    }
+                    if (environmentTransaction != null) {
+                        environmentTransaction =
+                            requireNotNull(environmentTransaction).copy(
+                                requestedVerification = EnvironmentEvaluationOutcome.MATCHED,
+                                detail = "Requested environment was verified before scenario execution.",
+                            )
+                    }
                 }
-                val locale = device.observeLocale(request.deviceSerial, operationTimeout(request, state))
-                if (locale.failure == DeviceFailureKind.CANCELLED) abort("Environment observation was cancelled.", locale.failure)
-                ensureActive()
-                val orientation = device.observeOrientation(request.deviceSerial, operationTimeout(request, state))
-                if (orientation.failure == DeviceFailureKind.CANCELLED) abort("Environment observation was cancelled.", orientation.failure)
-                ensureActive()
-                val animations = device.observeAnimations(request.deviceSerial, operationTimeout(request, state))
-                if (animations.failure == DeviceFailureKind.CANCELLED) abort("Environment observation was cancelled.", animations.failure)
-                environmentEvaluation =
-                    EnvironmentEvaluator.evaluate(inputs.environment.contract, locale, orientation, animations)
-                if (environmentEvaluation?.outcome != EnvironmentEvaluationOutcome.MATCHED) {
-                    throw RunAbort(requireNotNull(environmentEvaluation).explanation)
-                }
-                if (environmentTransaction != null) {
-                    environmentTransaction =
-                        requireNotNull(environmentTransaction).copy(
-                            requestedVerification = EnvironmentEvaluationOutcome.MATCHED,
-                            detail = "Requested environment was verified before scenario execution.",
-                        )
-                }
+            } else {
+                val detail =
+                    if (inputs?.environment == null && inputs != null) {
+                        "No environment contract was requested."
+                    } else {
+                        "A prior fatal stage prevented environment observation."
+                    }
+                state.skip(ExecutionStage.ENVIRONMENT, detail)
             }
-        } else {
-            val detail =
-                if (inputs?.environment == null && inputs != null) {
-                    "No environment contract was requested."
-                } else {
-                    "A prior fatal stage prevented environment observation."
-                }
-            state.skip(ExecutionStage.ENVIRONMENT, detail)
-        }
 
-        var bindingAttempt: BindingAttempt? = null
-        var bindingState: ArtifactBindingState? = null
-        if (inputs != null && state.canUseDevice()) {
-            stage<Unit>(state, ExecutionStage.ARTIFACT_BINDING) {
-                val binder = ArtifactBinder(device, wallClock)
-                val attempt =
-                    binder.bind(
-                        inputs.artifact,
-                        request.deviceSerial,
-                        inputs.scenario.scenario.expectedPackage,
-                        request.replaceExisting,
-                    ) { operationTimeout(request, state) }
-                bindingAttempt = attempt
-                if (attempt.error != null) {
-                    throw RunAbort(attempt.error, attempt.cancelled)
-                }
-                bindingState = requireNotNull(attempt.state)
-            }
-        } else {
-            state.skip(ExecutionStage.ARTIFACT_BINDING)
-        }
-
-        val backendPlan = inputs?.scenario?.scenario?.backendPlan
-        var networkSession: ActiveNetworkSession? = null
-        var networkEvaluation: NetworkEvaluationDocument? =
-            backendPlan?.let {
-                NetworkEvaluationDocument(
-                    NetworkEvaluationOutcome.NOT_EVALUATED,
-                    it.responsePlan.size,
-                    0,
-                    detail = "Network setup was not completed.",
-                )
-            }
-        if (backendPlan != null && bindingState != null && state.canUseDevice()) {
-            stage<Unit>(state, ExecutionStage.NETWORK_SETUP) {
-                ensureActive()
-                val setup =
-                    NetworkSessionManager(device, mockServerStarter).start(
-                        backendPlan,
-                        request.deviceSerial,
-                        operationTimeout(request, state),
-                    )
-                setup.cleanupDetail?.let { state.observations += HostObservation(wallClock.instant().toString(), "cleanup", it) }
-                if (setup.failureDetail != null) throw RunAbort(setup.failureDetail, setup.cancelled)
-                networkSession = requireNotNull(setup.session)
-            }
-        } else if (backendPlan != null) {
-            state.skip(ExecutionStage.NETWORK_SETUP)
-        }
-
-        if (bindingState != null && state.canUseDevice()) {
-            stage<Unit>(state, ExecutionStage.LAUNCH) {
-                ensureActive()
-                val result =
-                    device.launch(
-                        request.deviceSerial,
-                        requireNotNull(inputs).scenario.scenario.launchComponent,
-                        operationTimeout(request, state),
-                    )
-                if (!result.isSuccessful) abort(result.detail ?: "Activity launch failed.", result.failure)
-            }
-        } else {
-            state.skip(ExecutionStage.LAUNCH)
-        }
-
-        if (state.canUseDevice() && inputs != null) {
-            stage<Unit>(state, ExecutionStage.ASSERTION) {
-                executeSteps(request, state, inputs.scenario.scenario, workDirectory)
-            }
-        } else {
-            state.skip(ExecutionStage.ASSERTION)
-            inputs?.let { skipRemainingSteps(state, it.scenario.scenario) }
-        }
-        val assertion = state.assertionAttempt
-
-        var captureResult: CaptureResult? = null
-        if (state.canUseDevice() && inputs != null) {
-            captureResult =
-                captureStage(request, state, workDirectory).also { result ->
-                    val fatal = result?.document?.issues?.firstOrNull { it.code in FATAL_CAPTURE_ISSUES }
-                    if (fatal != null) state.failAfterStage(fatal.message, fatal.code == CollectionIssueCode.INTERRUPTED)
-                }
-            if (state.canUseDevice() && bindingState != null) {
-                try {
-                    val currentBinding = requireNotNull(bindingState)
-                    val finalCheck =
-                        ArtifactBinder(device, wallClock).finalCheck(
-                            currentBinding,
+            var bindingAttempt: BindingAttempt? = null
+            var bindingState: ArtifactBindingState? = null
+            if (inputs != null && state.canUseDevice()) {
+                stage<Unit>(state, ExecutionStage.ARTIFACT_BINDING) {
+                    val binder = ArtifactBinder(device, wallClock)
+                    val attempt =
+                        binder.bind(
+                            inputs.artifact,
                             request.deviceSerial,
                             inputs.scenario.scenario.expectedPackage,
+                            request.replaceExisting,
                         ) { operationTimeout(request, state) }
-                    bindingState = finalCheck.state
-                    val finalDigest = bindingState?.afterCapture?.sha256
-                    if (finalDigest != inputs.artifact.sha256) {
-                        state.failAfterStage(
-                            bindingState?.afterCapture?.unavailableReason
-                                ?: "Installed APK bytes changed after assertion and capture.",
-                            finalCheck.cancelled,
-                        )
+                    bindingAttempt = attempt
+                    if (attempt.error != null) {
+                        throw RunAbort(attempt.error, attempt.cancelled)
                     }
-                } catch (error: RunAbort) {
-                    state.failAfterStage(error.message ?: "Final artifact identity check failed.", error.cancelled)
-                } catch (_: Exception) {
-                    state.failAfterStage("Final artifact identity check failed.")
+                    bindingState = requireNotNull(attempt.state)
                 }
+            } else {
+                state.skip(ExecutionStage.ARTIFACT_BINDING)
             }
-        } else {
-            state.skip(ExecutionStage.CAPTURE)
-        }
 
-        var networkFiles = emptyList<EvidenceFileInput>()
-        var networkEvents = emptyList<TimelineEvent>()
-        if (backendPlan != null && networkSession != null) {
-            val executionFailedBeforeEvaluation = state.primaryError != null || state.cancelled
-            val finish =
-                stage<NetworkFinishResult>(state, ExecutionStage.NETWORK_EVALUATION) {
-                    requireNotNull(networkSession).finish(workDirectory, request.commandTimeoutMillis)
+            val backendPlan = inputs?.scenario?.scenario?.backendPlan
+            var networkSession: ActiveNetworkSession? = null
+            var networkEvaluation: NetworkEvaluationDocument? =
+                backendPlan?.let {
+                    NetworkEvaluationDocument(
+                        NetworkEvaluationOutcome.NOT_EVALUATED,
+                        it.responsePlan.size,
+                        0,
+                        detail = "Network setup was not completed.",
+                    )
                 }
-            if (finish != null) {
-                networkEvaluation =
-                    if (executionFailedBeforeEvaluation && finish.evaluation.outcome != NetworkEvaluationOutcome.NOT_EVALUATED) {
-                        finish.evaluation.copy(
-                            outcome = NetworkEvaluationOutcome.NOT_EVALUATED,
-                            detail = "Network expectations were not evaluated because execution did not reach a behavioral outcome.",
+            if (backendPlan != null && bindingState != null && state.canUseDevice()) {
+                stage<Unit>(state, ExecutionStage.NETWORK_SETUP) {
+                    ensureActive()
+                    val setup =
+                        NetworkSessionManager(device, mockServerStarter).start(
+                            backendPlan,
+                            request.deviceSerial,
+                            operationTimeout(request, state),
                         )
-                    } else {
-                        finish.evaluation
-                    }
-                networkFiles = finish.evidenceFiles
-                networkEvents = finish.timelineEvents
-                if (finish.evaluation.outcome == NetworkEvaluationOutcome.NOT_EVALUATED && !executionFailedBeforeEvaluation) {
-                    state.recordFailure(finish.evaluation.detail, false)
+                    setup.cleanupDetail?.let { state.observations += HostObservation(wallClock.instant().toString(), "cleanup", it) }
+                    if (setup.failureDetail != null) throw RunAbort(setup.failureDetail, setup.cancelled)
+                    networkSession = requireNotNull(setup.session)
                 }
-                finish.cleanupDetail?.let { state.recordFailure(it, false) }
+            } else if (backendPlan != null) {
+                state.skip(ExecutionStage.NETWORK_SETUP)
             }
-        } else if (backendPlan != null) {
-            state.skip(ExecutionStage.NETWORK_EVALUATION)
-        }
 
-        if (originalEnvironment != null) {
-            stage<Unit>(state, ExecutionStage.ENVIRONMENT_RESTORE) {
-                // Do not honor cooperative cancellation here: rollback has a separate bounded timeout.
-                val restored =
-                    device.restoreEnvironment(request.deviceSerial, originalEnvironment!!, request.commandTimeoutMillis)
-                if (!restored.isSuccessful) {
+            if (bindingState != null && state.canUseDevice()) {
+                stage<Unit>(state, ExecutionStage.LAUNCH) {
+                    ensureActive()
+                    val result =
+                        device.launch(
+                            request.deviceSerial,
+                            requireNotNull(inputs).scenario.scenario.launchComponent,
+                            operationTimeout(request, state),
+                        )
+                    if (!result.isSuccessful) abort(result.detail ?: "Activity launch failed.", result.failure)
+                }
+            } else {
+                state.skip(ExecutionStage.LAUNCH)
+            }
+
+            if (state.canUseDevice() && inputs != null) {
+                stage<Unit>(state, ExecutionStage.ASSERTION) {
+                    executeSteps(request, state, inputs.scenario.scenario, workDirectory)
+                }
+            } else {
+                state.skip(ExecutionStage.ASSERTION)
+                inputs?.let { skipRemainingSteps(state, it.scenario.scenario) }
+            }
+            val assertion = state.assertionAttempt
+
+            var captureResult: CaptureResult? = null
+            if (state.canUseDevice() && inputs != null) {
+                captureResult =
+                    captureStage(request, state, workDirectory).also { result ->
+                        val fatal = result?.document?.issues?.firstOrNull { it.code in FATAL_CAPTURE_ISSUES }
+                        if (fatal != null) state.failAfterStage(fatal.message, fatal.code == CollectionIssueCode.INTERRUPTED)
+                    }
+                if (state.canUseDevice() && bindingState != null) {
+                    try {
+                        val currentBinding = requireNotNull(bindingState)
+                        val finalCheck =
+                            ArtifactBinder(device, wallClock).finalCheck(
+                                currentBinding,
+                                request.deviceSerial,
+                                inputs.scenario.scenario.expectedPackage,
+                            ) { operationTimeout(request, state) }
+                        bindingState = finalCheck.state
+                        val finalDigest = bindingState?.afterCapture?.sha256
+                        if (finalDigest != inputs.artifact.sha256) {
+                            state.failAfterStage(
+                                bindingState?.afterCapture?.unavailableReason
+                                    ?: "Installed APK bytes changed after assertion and capture.",
+                                finalCheck.cancelled,
+                            )
+                        }
+                    } catch (error: RunAbort) {
+                        state.failAfterStage(error.message ?: "Final artifact identity check failed.", error.cancelled)
+                    } catch (_: Exception) {
+                        state.failAfterStage("Final artifact identity check failed.")
+                    }
+                }
+            } else {
+                state.skip(ExecutionStage.CAPTURE)
+            }
+
+            var networkFiles = emptyList<EvidenceFileInput>()
+            var networkEvents = emptyList<TimelineEvent>()
+            if (backendPlan != null && networkSession != null) {
+                val executionFailedBeforeEvaluation = state.primaryError != null || state.cancelled
+                val finish =
+                    stage<NetworkFinishResult>(state, ExecutionStage.NETWORK_EVALUATION) {
+                        requireNotNull(networkSession).finish(workDirectory, request.commandTimeoutMillis)
+                    }
+                if (finish != null) {
+                    networkEvaluation =
+                        if (executionFailedBeforeEvaluation && finish.evaluation.outcome != NetworkEvaluationOutcome.NOT_EVALUATED) {
+                            finish.evaluation.copy(
+                                outcome = NetworkEvaluationOutcome.NOT_EVALUATED,
+                                detail = "Network expectations were not evaluated because execution did not reach a behavioral outcome.",
+                            )
+                        } else {
+                            finish.evaluation
+                        }
+                    networkFiles = finish.evidenceFiles
+                    networkEvents = finish.timelineEvents
+                    if (finish.evaluation.outcome == NetworkEvaluationOutcome.NOT_EVALUATED && !executionFailedBeforeEvaluation) {
+                        state.recordFailure(finish.evaluation.detail, false)
+                    }
+                    finish.cleanupDetail?.let { state.recordFailure(it, false) }
+                }
+            } else if (backendPlan != null) {
+                state.skip(ExecutionStage.NETWORK_EVALUATION)
+            }
+
+            if (originalEnvironment != null) {
+                stage<Unit>(state, ExecutionStage.ENVIRONMENT_RESTORE) {
+                    // Do not honor cooperative cancellation here: rollback has a separate bounded timeout.
+                    val restored =
+                        device.restoreEnvironment(request.deviceSerial, originalEnvironment!!, request.commandTimeoutMillis)
+                    if (!restored.isSuccessful) {
+                        environmentTransaction =
+                            requireNotNull(environmentTransaction).copy(
+                                restorationAttempted = true,
+                                restorationOutcome = EnvironmentRestorationOutcome.RESTORE_UNAVAILABLE,
+                                detail = restored.detail ?: "Environment restoration was unavailable.",
+                            )
+                        throw RunAbort(requireNotNull(environmentTransaction).detail)
+                    }
+                    val observed = device.snapshotEnvironment(request.deviceSerial, request.commandTimeoutMillis)
+                    val matches = observed.value == originalEnvironment
                     environmentTransaction =
                         requireNotNull(environmentTransaction).copy(
                             restorationAttempted = true,
-                            restorationOutcome = EnvironmentRestorationOutcome.RESTORE_UNAVAILABLE,
-                            detail = restored.detail ?: "Environment restoration was unavailable.",
+                            restored = observed.value,
+                            restorationOutcome =
+                                if (matches) {
+                                    EnvironmentRestorationOutcome.RESTORED
+                                } else if (observed.isSuccessful) {
+                                    EnvironmentRestorationOutcome.RESTORE_MISMATCH
+                                } else {
+                                    EnvironmentRestorationOutcome.RESTORE_UNAVAILABLE
+                                },
+                            detail =
+                                if (matches) {
+                                    "Original low-level environment state was restored and verified."
+                                } else {
+                                    "Original low-level environment state could not be verified after restoration."
+                                },
                         )
-                    throw RunAbort(requireNotNull(environmentTransaction).detail)
+                    if (!matches) throw RunAbort(requireNotNull(environmentTransaction).detail)
                 }
-                val observed = device.snapshotEnvironment(request.deviceSerial, request.commandTimeoutMillis)
-                val matches = observed.value == originalEnvironment
+            } else if (inputs?.environment != null) {
                 environmentTransaction =
-                    requireNotNull(environmentTransaction).copy(
-                        restorationAttempted = true,
-                        restored = observed.value,
-                        restorationOutcome =
-                            if (matches) {
-                                EnvironmentRestorationOutcome.RESTORED
-                            } else if (observed.isSuccessful) {
-                                EnvironmentRestorationOutcome.RESTORE_MISMATCH
-                            } else {
-                                EnvironmentRestorationOutcome.RESTORE_UNAVAILABLE
-                            },
-                        detail =
-                            if (matches) {
-                                "Original low-level environment state was restored and verified."
-                            } else {
-                                "Original low-level environment state could not be verified after restoration."
-                            },
+                    EnvironmentTransactionDocument(
+                        mode = request.environmentMode,
+                        restorationOutcome = EnvironmentRestorationOutcome.NOT_REQUIRED,
+                        detail = "Verify-only mode did not mutate the emulator.",
                     )
-                if (!matches) throw RunAbort(requireNotNull(environmentTransaction).detail)
             }
-        } else if (inputs?.environment != null) {
-            environmentTransaction =
-                EnvironmentTransactionDocument(
-                    mode = request.environmentMode,
-                    restorationOutcome = EnvironmentRestorationOutcome.NOT_REQUIRED,
-                    detail = "Verify-only mode did not mutate the emulator.",
-                )
-        }
 
-        val bindingDocument =
-            bindingState?.let {
-                ArtifactBindingDocument(
-                    packageName = requireNotNull(inputs).scenario.scenario.expectedPackage,
-                    inputApkSha256 = it.stagedArtifact.sha256,
-                    action = it.action,
-                    beforeLaunch = it.beforeLaunch,
-                    afterCapture = it.afterCapture,
-                )
-            } ?: bindingAttempt?.document
-                ?: inputs?.let {
+            val bindingDocument =
+                bindingState?.let {
                     ArtifactBindingDocument(
-                        packageName = it.scenario.scenario.expectedPackage,
-                        inputApkSha256 = it.artifact.sha256,
-                        action = InstallationAction.NOT_ATTEMPTED,
+                        packageName = requireNotNull(inputs).scenario.scenario.expectedPackage,
+                        inputApkSha256 = it.stagedArtifact.sha256,
+                        action = it.action,
+                        beforeLaunch = it.beforeLaunch,
+                        afterCapture = it.afterCapture,
                     )
-                }
+                } ?: bindingAttempt?.document
+                    ?: inputs?.let {
+                        ArtifactBindingDocument(
+                            packageName = it.scenario.scenario.expectedPackage,
+                            inputApkSha256 = it.artifact.sha256,
+                            action = InstallationAction.NOT_ATTEMPTED,
+                        )
+                    }
 
-        if (inputs == null || bindingDocument == null) {
-            val diagnostic = writeDiagnostic(runDirectory, executionId, state, "A truthful schema-v3 bundle could not be constructed.")
+            if (inputs == null || bindingDocument == null) {
+                val diagnostic = writeDiagnostic(runDirectory, executionId, state, "A truthful schema-v3 bundle could not be constructed.")
+                deleteWorkDirectory(workDirectory)
+                return SmokeRunResult(null, diagnostic, null, false)
+            }
+            val result =
+                finalizeBundle(
+                    request,
+                    runDirectory,
+                    workDirectory,
+                    executionId,
+                    inputs,
+                    bindingDocument,
+                    bindingState,
+                    assertion,
+                    captureResult,
+                    networkEvaluation,
+                    networkFiles,
+                    networkEvents,
+                    environmentEvaluation,
+                    environmentTransaction,
+                    state,
+                )
             deleteWorkDirectory(workDirectory)
-            return SmokeRunResult(null, diagnostic, null, false)
+            return result
+        } finally {
+            lease?.close()
         }
-        val result =
-            finalizeBundle(
-                request,
-                runDirectory,
-                workDirectory,
-                executionId,
-                inputs,
-                bindingDocument,
-                bindingState,
-                assertion,
-                captureResult,
-                networkEvaluation,
-                networkFiles,
-                networkEvents,
-                environmentEvaluation,
-                environmentTransaction,
-                state,
-            )
-        deleteWorkDirectory(workDirectory)
-        return result
     }
 
     private fun executeSteps(

@@ -187,24 +187,29 @@ class SmokeAdbClient(
                 )
             }
         }
-        val auto = setting("system", "accelerometer_rotation")
-        val rotation = setting("system", "user_rotation")
-        val window = setting("global", ANIMATION_SETTINGS[0])
-        val transition = setting("global", ANIMATION_SETTINGS[1])
-        val animator = setting("global", ANIMATION_SETTINGS[2])
-        val values = listOf(auto, rotation, window, transition, animator)
-        values.firstOrNull { !it.isSuccessful }?.let { return DeviceCall(failure = it.failure, detail = it.detail) }
-        val state =
-            EmulatorEnvironmentState(
-                requireNotNull(locale.value).normalized,
-                requireNotNull(auto.value).toIntOrNull() ?: -1,
-                requireNotNull(rotation.value).toIntOrNull() ?: -1,
-                requireNotNull(window.value).toDoubleOrNull() ?: -1.0,
-                requireNotNull(transition.value).toDoubleOrNull() ?: -1.0,
-                requireNotNull(animator.value).toDoubleOrNull() ?: -1.0,
-            )
+        val values = mutableListOf<String>()
+        for ((namespace, name) in listOf(
+            "system" to "accelerometer_rotation",
+            "system" to "user_rotation",
+            "global" to ANIMATION_SETTINGS[0],
+            "global" to ANIMATION_SETTINGS[1],
+            "global" to ANIMATION_SETTINGS[2],
+        )) {
+            val value = setting(namespace, name)
+            if (!value.isSuccessful) return DeviceCall(failure = value.failure, detail = value.detail)
+            values += requireNotNull(value.value)
+        }
         return try {
-            DeviceCall(state)
+            DeviceCall(
+                EmulatorEnvironmentState(
+                    requireNotNull(locale.value).normalized,
+                    values[0].toIntOrNull() ?: -1,
+                    values[1].toIntOrNull() ?: -1,
+                    values[2].toDoubleOrNull() ?: -1.0,
+                    values[3].toDoubleOrNull() ?: -1.0,
+                    values[4].toDoubleOrNull() ?: -1.0,
+                ),
+            )
         } catch (
             _: IllegalArgumentException,
         ) {
@@ -609,7 +614,7 @@ class SmokeAdbClient(
     }
 
     private fun target(serial: String): List<String> {
-        require(SERIAL.matches(serial)) { "Invalid device serial." }
+        require(DEVICE_SERIAL.matches(serial)) { "Invalid device serial." }
         return listOf("-s", serial)
     }
 
@@ -687,7 +692,6 @@ private fun validRemoteApkPath(path: String): Boolean =
 private const val TEXT_LIMIT_BYTES = 65_536L
 private const val SETTING_LIMIT_BYTES = 1024L
 private val ANIMATION_SETTINGS = listOf("window_animation_scale", "transition_animation_scale", "animator_duration_scale")
-private val SERIAL = Regex("[A-Za-z0-9][A-Za-z0-9._:\\[\\]-]{0,255}")
 private val PACKAGE_NAME = Regex("[a-zA-Z][a-zA-Z0-9_]*(?:\\.[a-zA-Z][a-zA-Z0-9_]*)+")
 private val COMPONENT = Regex("[a-zA-Z][a-zA-Z0-9_.]*/[a-zA-Z][a-zA-Z0-9_.]*")
 private val OWNED_DUMP_PATH = Regex("/sdcard/Download/droidproof-[A-Za-z0-9_-]{1,128}\\.xml")

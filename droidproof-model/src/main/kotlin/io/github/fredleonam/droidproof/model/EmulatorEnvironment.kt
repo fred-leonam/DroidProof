@@ -117,7 +117,9 @@ data class EmulatorEnvironmentEvaluationV1(
             "Locale is the validated persist.sys.locale system property for the selected emulator.",
             "Orientation is the configured user-0 rotation only when Android auto-rotation is disabled.",
             "Animation scales are validated global settings read at one point in time.",
-            "DroidProof did not change, lock, restore, provision, start, or stop the emulator.",
+            "Environment evaluation is a bounded point-in-time observation and does not prove stability for the entire execution.",
+            "Requested mutation and restoration are documented separately by environment transaction evidence.",
+            "DroidProof does not provision, start, or stop the emulator.",
         ),
 ) {
     init {

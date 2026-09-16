@@ -47,6 +47,21 @@ class SmokeCoordinatorTest {
     private val wallClock = Clock.fixed(Instant.parse("2026-09-12T12:00:00Z"), ZoneOffset.UTC)
 
     @Test
+    fun `lease acquisition failure prevents every device operation`() {
+        val device = FakeSmokeDevice().apply { dumps += DumpResponse(FakeSmokeDevice.MATCHING_XML) }
+        val result =
+            coordinator(
+                device,
+                completeCapture(),
+                leaseProvider = EmulatorExecutionLeaseProvider { throw EmulatorExecutionLeaseUnavailableException() },
+            ).run(request("lease-unavailable"))
+
+        assertEquals(ExecutionStatus.ERROR, result.document?.status)
+        assertEquals(ScenarioVerdict.NOT_EVALUATED, result.document?.verdict)
+        assertTrue(device.operations.isEmpty())
+    }
+
+    @Test
     fun `passing assertion writes a complete integrity-valid artifact-bound bundle`() {
         val device = FakeSmokeDevice().apply { dumps += DumpResponse(FakeSmokeDevice.MATCHING_XML) }
 
@@ -86,6 +101,7 @@ class SmokeCoordinatorTest {
         val evaluation =
             evidenceJson.decodeFromString<EmulatorEnvironmentEvaluationV1>(Files.readString(bundle.resolve("environment/evaluation.json")))
         assertEquals(EnvironmentEvaluationOutcome.MATCHED, evaluation.outcome)
+        assertTrue(evaluation.limitations.none { it.contains("did not change, lock, restore") })
         val manifest = evidenceJson.decodeFromString<EvidenceBundleManifestV3>(Files.readString(bundle.resolve("manifest.json")))
         assertEquals("en-US", manifest.observedEnvironment.locale.value)
         assertEquals("PORTRAIT", manifest.observedEnvironment.orientation.value)
@@ -567,6 +583,7 @@ class SmokeCoordinatorTest {
         capture: DeviceEvidenceCapture,
         monotonicClock: FakeMonotonicClock = FakeMonotonicClock(),
         assertion: UiAssertionRunner = assertionRunner(device, monotonicClock),
+        leaseProvider: EmulatorExecutionLeaseProvider = EmulatorExecutionLeaseProvider { EmulatorExecutionLease {} },
     ) = SmokeCoordinator(
         device,
         capture,
@@ -575,6 +592,7 @@ class SmokeCoordinatorTest {
         cancellation = CancellationSignal { false },
         assertionRunner = assertion,
         idSource = { "run-001" },
+        leaseProvider = leaseProvider,
     )
 
     @Test
