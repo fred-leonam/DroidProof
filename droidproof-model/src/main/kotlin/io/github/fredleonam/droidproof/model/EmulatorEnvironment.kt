@@ -2,6 +2,52 @@ package io.github.fredleonam.droidproof.model
 
 import kotlinx.serialization.Serializable
 
+/** A bounded point-in-time observation, deliberately not an image provenance claim. */
+@Serializable
+data class EmulatorCapabilityObservationV1(
+    val capabilitySchemaVersion: Int = 1,
+    val apiLevel: Int,
+    val buildFingerprint: String,
+    val bootIdentifier: String,
+    val commandSurfaces: List<String>,
+    val limitations: List<String> =
+        listOf(
+            "Image metadata is an observation, not image provenance.",
+            "The boot identifier is a bounded continuity signal, not remote attestation.",
+            "Advertised command surfaces do not prove future write permission.",
+        ),
+) {
+    init {
+        require(capabilitySchemaVersion == 1)
+        require(apiLevel in 1..999)
+        require(buildFingerprint.length in 1..256 && buildFingerprint.all { it.code in 0x21..0x7e })
+        require(Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}").matches(bootIdentifier))
+        require(commandSurfaces.isNotEmpty() && commandSurfaces.all { it.length in 1..96 && it.all { c -> c.code in 0x21..0x7e } })
+    }
+}
+
+@Serializable
+enum class EmulatorContinuityOutcome { MATCHED, MISMATCHED, UNAVAILABLE }
+
+@Serializable
+data class EmulatorContinuityDocumentV1(
+    val continuitySchemaVersion: Int = 1,
+    val initial: EmulatorCapabilityObservationV1,
+    val final: EmulatorCapabilityObservationV1? = null,
+    val environment: EmulatorEnvironmentEvaluationV1? = null,
+    val outcome: EmulatorContinuityOutcome,
+    val explanation: String,
+    val limitations: List<String> =
+        listOf(
+            "The cooperative lease cannot prevent Android Studio, humans, or arbitrary ADB processes from changing the emulator.",
+            "Sequential observations do not prove uninterrupted state stability.",
+        ),
+) {
+    init {
+        require(continuitySchemaVersion == 1 && explanation.isNotBlank() && explanation.length <= 512)
+    }
+}
+
 @Serializable
 data class EmulatorEnvironmentContractV1(
     val schemaVersion: Int,

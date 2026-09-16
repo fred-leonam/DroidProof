@@ -8,6 +8,8 @@ import io.github.fredleonam.droidproof.evidence.TIMELINE_FILE
 import io.github.fredleonam.droidproof.evidence.V3_SCHEMA_VERSION
 import io.github.fredleonam.droidproof.evidence.evidenceJson
 import io.github.fredleonam.droidproof.model.BundleRelativePath
+import io.github.fredleonam.droidproof.model.EmulatorCapabilityObservationV1
+import io.github.fredleonam.droidproof.model.EmulatorContinuityDocumentV1
 import io.github.fredleonam.droidproof.model.EmulatorEnvironmentEvaluationV1
 import io.github.fredleonam.droidproof.model.EnvironmentTransactionDocument
 import io.github.fredleonam.droidproof.model.EventSource
@@ -124,6 +126,8 @@ class EvidenceReportGenerator {
                 append(observedEnvironment(manifest.observedEnvironment))
                 append(emulatorEnvironmentSection(bundle, manifest.evidenceFiles))
                 append(environmentTransactionSection(bundle, manifest.evidenceFiles))
+                append(capabilitySection(bundle, manifest.evidenceFiles))
+                append(continuitySection(bundle, manifest.evidenceFiles))
                 append(timelineSection(timeline, manifest.evidenceFiles, links, integrityBound = true))
                 append(networkSection(timeline, manifest.evidenceFiles, links))
                 append(screenshotSection(manifest.evidenceFiles, links))
@@ -337,6 +341,51 @@ class EvidenceReportGenerator {
             append(rowHtml("Restoration status", badge(transaction.restorationOutcome.name)))
             append(row("Restored environment", state(transaction.restored)))
             appendLine("</dl><p>${Html.escape(transaction.detail)}</p></section>")
+        }
+    }
+
+    private fun capabilitySection(
+        bundle: Path,
+        inventory: List<EvidenceFileDescriptor>,
+    ): String {
+        val descriptor = inventory.singleOrNull { it.path.value == "environment/capabilities.json" } ?: return ""
+        val value =
+            evidenceJson.decodeFromString<EmulatorCapabilityObservationV1>(
+                Files.readString(bundle.resolve(descriptor.path.value)),
+            )
+        return buildString {
+            appendLine("<section><h2>Emulator capability and image observation</h2><dl class=\"summary\">")
+            append(row("API level", value.apiLevel.toString()))
+            append(row("Build fingerprint", value.buildFingerprint))
+            append(row("Boot identifier", value.bootIdentifier))
+            append(row("Observed command surfaces", value.commandSurfaces.joinToString(", ")))
+            appendLine(
+                "</dl><p>Image metadata is an observation, not image provenance. " +
+                    "The boot identifier is a bounded continuity signal, not remote attestation.</p></section>",
+            )
+        }
+    }
+
+    private fun continuitySection(
+        bundle: Path,
+        inventory: List<EvidenceFileDescriptor>,
+    ): String {
+        val descriptor = inventory.singleOrNull { it.path.value == "environment/continuity.json" } ?: return ""
+        val value =
+            evidenceJson.decodeFromString<EmulatorContinuityDocumentV1>(
+                Files.readString(bundle.resolve(descriptor.path.value)),
+            )
+        return buildString {
+            appendLine("<section><h2>Emulator continuity</h2><dl class=\"summary\">")
+            append(rowHtml("Outcome", badge(value.outcome.name)))
+            append(row("Initial boot identifier", value.initial.bootIdentifier))
+            append(row("Final boot identifier", value.final?.bootIdentifier ?: "Unavailable"))
+            append(row("Final environment", value.environment?.outcome?.name ?: "Unavailable"))
+            appendLine(
+                "</dl><p>${Html.escape(value.explanation)}</p><p>" +
+                    "The cooperative lease cannot prevent Android Studio, humans, or arbitrary ADB processes " +
+                    "from changing the emulator; sequential observations do not prove uninterrupted state stability.</p></section>",
+            )
         }
     }
 

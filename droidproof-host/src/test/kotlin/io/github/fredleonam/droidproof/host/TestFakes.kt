@@ -1,5 +1,8 @@
 package io.github.fredleonam.droidproof.host
 
+import io.github.fredleonam.droidproof.model.EmulatorCapabilityObservationV1
+import io.github.fredleonam.droidproof.model.EmulatorEnvironmentContractV1
+import io.github.fredleonam.droidproof.model.EmulatorEnvironmentState
 import io.github.fredleonam.droidproof.model.Orientation
 import java.nio.file.Files
 import java.nio.file.Path
@@ -14,9 +17,30 @@ internal open class FakeSmokeDevice : SmokeDeviceOperations {
     val operations = mutableListOf<String>()
     var installedBytes: List<ByteArray> = emptyList()
     var preflightResult: DeviceCall<Unit> = DeviceCall(Unit)
+    var capabilityResult =
+        DeviceCall(
+            EmulatorCapabilityObservationV1(
+                apiLevel = 35,
+                buildFingerprint = "generic/sdk",
+                bootIdentifier = "123e4567-e89b-12d3-a456-426614174000",
+                commandSurfaces = listOf("getprop", "settings", "cmd-locale", "uiautomator-dump"),
+            ),
+        )
+
+    override fun probeCapabilities(
+        serial: String,
+        timeoutMillis: Long,
+    ): DeviceCall<EmulatorCapabilityObservationV1> {
+        operations += "capabilities:$serial"
+        return capabilityResult
+    }
+
     var localeResult = DeviceCall(DeviceLocaleObservation("en-US", "en-US"))
     var orientationResult = DeviceCall(DeviceOrientationObservation(Orientation.PORTRAIT, "accelerometerRotation=0,userRotation=0"))
     var animationsResult = DeviceCall(DeviceAnimationObservations(0.0, 0.0, 0.0))
+    var snapshotResult = DeviceCall(EmulatorEnvironmentState("en-US", 0, 0, 0.0, 0.0, 0.0))
+    var applyResult: DeviceCall<Unit> = DeviceCall(Unit)
+    var restoreResult: DeviceCall<Unit> = DeviceCall(Unit)
     var installResult: DeviceCall<Unit> = DeviceCall(Unit)
     var launchResult: DeviceCall<Unit> = DeviceCall(Unit)
     var reverseResult: DeviceCall<Unit> = DeviceCall(Unit)
@@ -59,6 +83,32 @@ internal open class FakeSmokeDevice : SmokeDeviceOperations {
         operations += "animations:$serial"
         afterOperation("animations")
         return animationsResult
+    }
+
+    override fun snapshotEnvironment(
+        serial: String,
+        timeoutMillis: Long,
+    ): DeviceCall<EmulatorEnvironmentState> {
+        operations += "snapshot:$serial"
+        return snapshotResult
+    }
+
+    override fun applyEnvironment(
+        serial: String,
+        contract: EmulatorEnvironmentContractV1,
+        timeoutMillis: Long,
+    ): DeviceCall<Unit> {
+        operations += "apply:$serial"
+        return applyResult
+    }
+
+    override fun restoreEnvironment(
+        serial: String,
+        state: EmulatorEnvironmentState,
+        timeoutMillis: Long,
+    ): DeviceCall<Unit> {
+        operations += "restore:$serial"
+        return restoreResult
     }
 
     override fun packagePaths(

@@ -91,7 +91,7 @@ class SmokeCoordinatorTest {
 
         assertTrue(result.isSuccessful)
         assertEquals(
-            listOf("preflight", "locale", "orientation", "animations", "paths"),
+            listOf("preflight", "capabilities", "locale", "orientation", "animations"),
             device.operations.take(5).map { it.substringBefore(':') },
         )
         assertContentEquals(
@@ -193,7 +193,10 @@ class SmokeCoordinatorTest {
             ).run(environmentRequest("env-cancel"))
         assertEquals(ExecutionStatus.CANCELLED, cancelledResult.document?.status)
         assertEquals(ScenarioVerdict.NOT_EVALUATED, cancelledResult.document?.verdict)
-        assertEquals(listOf("preflight", "locale"), cancelled.operations.map { it.substringBefore(':') })
+        assertEquals(
+            listOf("preflight", "capabilities", "locale", "capabilities", "locale", "orientation", "animations"),
+            cancelled.operations.map { it.substringBefore(':') },
+        )
         val cancelledManifest =
             evidenceJson.decodeFromString<EvidenceBundleManifestV3>(
                 Files.readString(requireNotNull(cancelledResult.output).resolve("manifest.json")),
@@ -390,7 +393,10 @@ class SmokeCoordinatorTest {
         assertTrue(result.isSuccessful)
         val operations = device.operations.map { it.substringBefore(':') }
         assertEquals(
-            listOf("preflight", "paths", "install", "paths", "pull", "launch", "dump", "tap", "dump", "capture", "paths", "pull"),
+            listOf(
+                "preflight", "capabilities", "paths", "install", "paths", "pull", "launch", "dump", "tap",
+                "dump", "capture", "paths", "pull",
+            ),
             operations,
         )
         assertTrue("tap:emulator-5554:20:40" in device.operations)
@@ -550,6 +556,7 @@ class SmokeCoordinatorTest {
                 "scenario.step.assert",
                 "execution.assertion",
                 "execution.capture",
+                "execution.environment_continuity",
                 "execution.finalization",
             ),
             timeline.events.map { it.type },
@@ -610,7 +617,7 @@ class SmokeCoordinatorTest {
         assertTrue(result.isSuccessful)
         assertEquals(
             listOf(
-                "preflight", "paths", "install", "paths", "pull", "launch", "dump", "tap", "input",
+                "preflight", "capabilities", "paths", "install", "paths", "pull", "launch", "dump", "tap", "input",
                 "dump", "tap", "dump", "capture", "paths", "pull",
             ),
             device.operations.map { it.substringBefore(':') },

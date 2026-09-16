@@ -19,6 +19,9 @@ import io.github.fredleonam.droidproof.model.ArtifactBindingSummary
 import io.github.fredleonam.droidproof.model.BundleId
 import io.github.fredleonam.droidproof.model.BundleRelativePath
 import io.github.fredleonam.droidproof.model.DroidProofVersion
+import io.github.fredleonam.droidproof.model.EmulatorCapabilityObservationV1
+import io.github.fredleonam.droidproof.model.EmulatorContinuityDocumentV1
+import io.github.fredleonam.droidproof.model.EmulatorContinuityOutcome
 import io.github.fredleonam.droidproof.model.EmulatorEnvironmentEvaluationV1
 import io.github.fredleonam.droidproof.model.EmulatorEnvironmentState
 import io.github.fredleonam.droidproof.model.EnvironmentEvaluationOutcome
@@ -105,6 +108,7 @@ class SmokeCoordinator(
         val workDirectory = Files.createDirectory(runDirectory.resolve("work"))
         val state = MutableExecutionState(startedAt) { wallClock.instant().toString() }
         var lease: EmulatorExecutionLease? = null
+        var capabilities: EmulatorCapabilityObservationV1? = null
 
         try {
             var accepted: AcceptedInputs? = null
@@ -124,10 +128,14 @@ class SmokeCoordinator(
                     monotonicClock.nanoTime() + TimeUnit.MILLISECONDS.toNanos(overallBudget.coerceAtMost(MAX_OVERALL_BUDGET_MILLIS))
                 val preflight = device.preflight(request.deviceSerial, operationTimeout(request, state))
                 if (!preflight.isSuccessful) abort(preflight.detail ?: "Device preflight failed.", preflight.failure)
+                val capability = device.probeCapabilities(request.deviceSerial, operationTimeout(request, state))
+                if (!capability.isSuccessful) abort(capability.detail ?: "Emulator capability observation failed.", capability.failure)
+                capabilities = requireNotNull(capability.value)
             }
             val inputs = accepted
 
             var environmentEvaluation: EmulatorEnvironmentEvaluationV1? = null
+            var continuity: EmulatorContinuityDocumentV1? = null
             var environmentTransaction: EnvironmentTransactionDocument? = null
             var originalEnvironment: EmulatorEnvironmentState? = null
             if (inputs?.environment != null && state.canUseDevice()) {
@@ -350,6 +358,48 @@ class SmokeCoordinator(
                 state.skip(ExecutionStage.NETWORK_EVALUATION)
             }
 
+            if (inputs?.environment != null && capabilities != null) {
+                stage<Unit>(state, ExecutionStage.ENVIRONMENT_CONTINUITY) {
+                    // Deliberately do not use ensureActive: a post-mutation check remains useful after cancellation.
+                    val finalIdentity = device.probeCapabilities(request.deviceSerial, request.commandTimeoutMillis)
+                    val locale = device.observeLocale(request.deviceSerial, request.commandTimeoutMillis)
+                    val orientation = device.observeOrientation(request.deviceSerial, request.commandTimeoutMillis)
+                    val animations = device.observeAnimations(request.deviceSerial, request.commandTimeoutMillis)
+                    val finalEnvironment = EnvironmentEvaluator.evaluate(inputs.environment.contract, locale, orientation, animations)
+                    val final = finalIdentity.value
+                    val outcome =
+                        when {
+                            final == null || finalEnvironment.outcome == EnvironmentEvaluationOutcome.UNAVAILABLE ->
+                                EmulatorContinuityOutcome.UNAVAILABLE
+                            final.apiLevel != capabilities!!.apiLevel ||
+                                final.buildFingerprint != capabilities!!.buildFingerprint ||
+                                final.bootIdentifier != capabilities!!.bootIdentifier ||
+                                finalEnvironment.outcome != EnvironmentEvaluationOutcome.MATCHED ->
+                                EmulatorContinuityOutcome.MISMATCHED
+                            else -> EmulatorContinuityOutcome.MATCHED
+                        }
+                    continuity =
+                        EmulatorContinuityDocumentV1(
+                            initial = capabilities!!,
+                            final = final,
+                            environment = finalEnvironment,
+                            outcome = outcome,
+                            explanation =
+                                when (outcome) {
+                                    EmulatorContinuityOutcome.MATCHED ->
+                                        "Image identity, boot identifier, and requested environment matched sequential observations."
+                                    EmulatorContinuityOutcome.MISMATCHED ->
+                                        "Image identity, boot identifier, or requested environment drifted before restoration."
+                                    EmulatorContinuityOutcome.UNAVAILABLE ->
+                                        "A required continuity observation was unavailable before restoration."
+                                },
+                        )
+                    if (outcome != EmulatorContinuityOutcome.MATCHED) state.recordFailure(requireNotNull(continuity).explanation, false)
+                }
+            } else if (inputs?.environment == null) {
+                state.skip(ExecutionStage.ENVIRONMENT_CONTINUITY, "No environment contract was requested; no continuity claim was made.")
+            }
+
             if (originalEnvironment != null) {
                 stage<Unit>(state, ExecutionStage.ENVIRONMENT_RESTORE) {
                     // Do not honor cooperative cancellation here: rollback has a separate bounded timeout.
@@ -435,6 +485,8 @@ class SmokeCoordinator(
                     networkEvents,
                     environmentEvaluation,
                     environmentTransaction,
+                    capabilities,
+                    continuity,
                     state,
                 )
             deleteWorkDirectory(workDirectory)
@@ -625,6 +677,8 @@ class SmokeCoordinator(
         networkEvents: List<TimelineEvent>,
         environmentEvaluation: EmulatorEnvironmentEvaluationV1?,
         environmentTransaction: EnvironmentTransactionDocument?,
+        capabilities: EmulatorCapabilityObservationV1?,
+        continuity: EmulatorContinuityDocumentV1?,
         state: MutableExecutionState,
     ): SmokeRunResult {
         val finalizationStarted = wallClock.instant().toString()
@@ -635,7 +689,11 @@ class SmokeCoordinator(
                 bindingState.afterCapture.sha256 == accepted.artifact.sha256
         val evaluated = assertionAttempt?.document?.outcome in setOf(AssertionOutcome.MATCHED, AssertionOutcome.NOT_MATCHED)
         val environmentComplete =
-            accepted.environment == null || environmentEvaluation?.outcome == EnvironmentEvaluationOutcome.MATCHED
+            accepted.environment == null ||
+                (
+                    environmentEvaluation?.outcome == EnvironmentEvaluationOutcome.MATCHED &&
+                        continuity?.outcome == EmulatorContinuityOutcome.MATCHED
+                )
         val environmentRestored =
             (environmentTransaction?.restorationOutcome ?: EnvironmentRestorationOutcome.NOT_REQUIRED) in
                 setOf(EnvironmentRestorationOutcome.NOT_REQUIRED, EnvironmentRestorationOutcome.RESTORED)
@@ -705,6 +763,8 @@ class SmokeCoordinator(
                     captureResult,
                     environmentEvaluation,
                     environmentTransaction,
+                    capabilities = capabilities,
+                    continuity = continuity,
                 )
             val manifest =
                 manifest(request, executionId, accepted, binding, bindingState, captureResult, environmentEvaluation, resultDocument)
@@ -712,7 +772,7 @@ class SmokeCoordinator(
             publisher.publish(
                 EvidenceBundleRequestV3(
                     manifest,
-                    timeline(resultDocument, networkEvents, environmentEvaluation, environmentTransaction),
+                    timeline(resultDocument, networkEvents, environmentEvaluation, environmentTransaction, capabilities, continuity),
                     sources,
                 ),
                 bundle,
@@ -750,6 +810,8 @@ class SmokeCoordinator(
         captureResult: CaptureResult?,
         environmentEvaluation: EmulatorEnvironmentEvaluationV1?,
         environmentTransaction: EnvironmentTransactionDocument?,
+        capabilities: EmulatorCapabilityObservationV1?,
+        continuity: EmulatorContinuityDocumentV1?,
     ): List<EvidenceFileInput> {
         val documents = Files.createDirectories(workDirectory.resolve("documents"))
         val scenario = documents.resolve("scenario.json").also { Files.write(it, accepted.scenario.exactBytes) }
@@ -774,6 +836,14 @@ class SmokeCoordinator(
                 val transactionFile = documents.resolve("environment-transaction.json").also { writeJson(it, transaction) }
                 files += EvidenceFileInput(transactionFile, ENVIRONMENT_TRANSACTION_PATH, "application/json", EvidenceFileRole.TEST_RESULT)
             }
+            continuity?.let { document ->
+                val continuityFile = documents.resolve("continuity.json").also { writeJson(it, document) }
+                files += EvidenceFileInput(continuityFile, ENVIRONMENT_CONTINUITY_PATH, "application/json", EvidenceFileRole.TEST_RESULT)
+            }
+        }
+        capabilities?.let { capability ->
+            val capabilityFile = documents.resolve("capabilities.json").also { writeJson(it, capability) }
+            files += EvidenceFileInput(capabilityFile, ENVIRONMENT_CAPABILITIES_PATH, "application/json", EvidenceFileRole.TEST_RESULT)
         }
         captureResult?.let { captured ->
             files +=
@@ -880,11 +950,17 @@ class SmokeCoordinator(
         networkEvents: List<TimelineEvent>,
         environmentEvaluation: EmulatorEnvironmentEvaluationV1?,
         environmentTransaction: EnvironmentTransactionDocument?,
+        capabilities: EmulatorCapabilityObservationV1?,
+        continuity: EmulatorContinuityDocumentV1?,
     ): List<TimelineEvent> =
         result.stages.flatMapIndexed { stageIndex, stage ->
             val stageNumber = (stageIndex + 1).toString().padStart(3, '0')
             val evidence =
                 when (stage.stage) {
+                    ExecutionStage.PREFLIGHT ->
+                        capabilities?.let {
+                            listOf(EvidenceReference(ENVIRONMENT_CAPABILITIES_PATH, "application/json"))
+                        }.orEmpty()
                     ExecutionStage.ENVIRONMENT ->
                         environmentEvaluation?.let {
                             listOf(EvidenceReference(ENVIRONMENT_EVALUATION_PATH, "application/json"))
@@ -892,6 +968,10 @@ class SmokeCoordinator(
                     ExecutionStage.ENVIRONMENT_RESTORE ->
                         environmentTransaction?.let {
                             listOf(EvidenceReference(ENVIRONMENT_TRANSACTION_PATH, "application/json"))
+                        }.orEmpty()
+                    ExecutionStage.ENVIRONMENT_CONTINUITY ->
+                        continuity?.let {
+                            listOf(EvidenceReference(ENVIRONMENT_CONTINUITY_PATH, "application/json"))
                         }.orEmpty()
                     ExecutionStage.ASSERTION ->
                         result.assertion.hierarchyPath?.let {
@@ -1121,6 +1201,8 @@ class SmokeCoordinator(
         val ENVIRONMENT_CONTRACT_PATH = BundleRelativePath("environment/contract.json")
         val ENVIRONMENT_EVALUATION_PATH = BundleRelativePath("environment/evaluation.json")
         val ENVIRONMENT_TRANSACTION_PATH = BundleRelativePath("environment/transaction.json")
+        val ENVIRONMENT_CAPABILITIES_PATH = BundleRelativePath("environment/capabilities.json")
+        val ENVIRONMENT_CONTINUITY_PATH = BundleRelativePath("environment/continuity.json")
         val HIERARCHY_PATH = BundleRelativePath("ui/hierarchy.xml")
         val CAPTURE_PATH = BundleRelativePath("capture/capture.json")
         val SCREENSHOT_PATH = BundleRelativePath("screenshots/display.png")

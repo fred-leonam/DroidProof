@@ -17,6 +17,48 @@ class SmokeAdbClientTest {
     lateinit var directory: Path
 
     @Test
+    fun `capability probe uses bounded serial-scoped read-only properties and rejects unsafe values`() {
+        val requests = mutableListOf<CommandRequest>()
+
+        fun client(values: Map<String, String>) =
+            SmokeAdbClient(
+                Path.of("/fake/adb"),
+                CommandRunner { request ->
+                    requests += request
+                    CommandResult(stdout = values[request.arguments.last()].orEmpty())
+                },
+            )
+        val valid =
+            client(
+                mapOf(
+                    "ro.build.version.sdk" to "35\n",
+                    "ro.build.fingerprint" to "generic/sdk\n",
+                    "ro.boot.boot_id" to "123e4567-e89b-12d3-a456-426614174000\n",
+                ),
+            )
+        assertEquals(35, valid.probeCapabilities("emulator-5554", 1_000).value?.apiLevel)
+        assertTrue(requests.all { it.arguments.take(3) == listOf("/fake/adb", "-s", "emulator-5554") && it.arguments.contains("getprop") })
+        val invalid =
+            client(
+                mapOf(
+                    "ro.build.version.sdk" to "thirty-five\n",
+                    "ro.build.fingerprint" to "generic/sdk\n",
+                    "ro.boot.boot_id" to "123e4567-e89b-12d3-a456-426614174000\n",
+                ),
+            )
+        assertEquals(DeviceFailureKind.INVALID_OUTPUT, invalid.probeCapabilities("emulator-5554", 1_000).failure)
+        val multiline =
+            client(
+                mapOf(
+                    "ro.build.version.sdk" to "35\n",
+                    "ro.build.fingerprint" to "one\ntwo\n",
+                    "ro.boot.boot_id" to "123e4567-e89b-12d3-a456-426614174000\n",
+                ),
+            )
+        assertEquals(DeviceFailureKind.INVALID_OUTPUT, multiline.probeCapabilities("emulator-5554", 1_000).failure)
+    }
+
+    @Test
     fun `transaction commands snapshot apply and restore exact state with serial scoped arguments`() {
         val requests = mutableListOf<CommandRequest>()
         val client =
