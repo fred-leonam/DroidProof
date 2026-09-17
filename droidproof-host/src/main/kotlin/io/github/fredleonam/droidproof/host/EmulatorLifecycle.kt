@@ -26,6 +26,7 @@ data class EmulatorLifecycleConfiguration(
 
 interface ManagedEmulatorSession : AutoCloseable {
     val serial: String
+
     override fun close()
 }
 
@@ -43,12 +44,26 @@ class LegacyEmulatorLifecycleManager(
 ) : EmulatorLifecycleManager {
     override fun start(configuration: EmulatorLifecycleConfiguration): ManagedEmulatorSession {
         val avd = configuration.avdName ?: error("External emulator mode does not start a process.")
-        val listed = runner.execute(CommandRequest(listOf(configuration.emulatorPath.toString(), "-list-avds"), configuration.startupTimeoutMillis))
+        val listed =
+            runner.execute(
+                CommandRequest(listOf(configuration.emulatorPath.toString(), "-list-avds"), configuration.startupTimeoutMillis),
+            )
         if (listed.failure != null || listed.exitCode != 0) throw EmulatorLifecycleException("Could not list existing AVDs.")
-        if (listed.stdout.lineSequence().map(String::trim).none { it == avd }) throw EmulatorLifecycleException("Requested AVD '$avd' does not exist.")
+        if (listed.stdout.lineSequence().map(String::trim).none {
+                it == avd
+            }
+        ) {
+            throw EmulatorLifecycleException("Requested AVD '$avd' does not exist.")
+        }
         val serial = "emulator-${configuration.port}"
-        val process = try { processFactory(listOf(configuration.emulatorPath.toString(), "-avd", avd, "-port", configuration.port.toString())) }
-        catch (e: Exception) { throw EmulatorLifecycleException("Could not start AVD '$avd'.", e) }
+        val process =
+            try {
+                processFactory(listOf(configuration.emulatorPath.toString(), "-avd", avd, "-port", configuration.port.toString()))
+            } catch (
+                e: Exception,
+            ) {
+                throw EmulatorLifecycleException("Could not start AVD '$avd'.", e)
+            }
         val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(configuration.startupTimeoutMillis)
         try {
             while (System.nanoTime() < deadline) {
@@ -57,7 +72,20 @@ class LegacyEmulatorLifecycleManager(
                 val devices = runner.execute(CommandRequest(listOf(configuration.adbPath.toString(), "devices"), remaining(deadline)))
                 val state = devices.stdout.lineSequence().firstOrNull { it.startsWith("$serial\t") }?.substringAfter('\t')?.trim()
                 if (state == "device") {
-                    val boot = runner.execute(CommandRequest(listOf(configuration.adbPath.toString(), "-s", serial, "shell", "getprop", "sys.boot_completed"), remaining(deadline)))
+                    val boot =
+                        runner.execute(
+                            CommandRequest(
+                                listOf(
+                                    configuration.adbPath.toString(),
+                                    "-s",
+                                    serial,
+                                    "shell",
+                                    "getprop",
+                                    "sys.boot_completed",
+                                ),
+                                remaining(deadline),
+                            ),
+                        )
                     if (boot.stdout.trim() == "1") return Session(serial, process, configuration, runner, sleeper)
                 }
                 sleeper(100)
@@ -74,6 +102,7 @@ class LegacyEmulatorLifecycleManager(
     }
 
     private fun remaining(deadline: Long) = ((deadline - System.nanoTime()) / 1_000_000).coerceAtLeast(1)
+
     private fun error(message: String): Nothing = throw EmulatorLifecycleException(message)
 
     private class Session(
@@ -85,12 +114,28 @@ class LegacyEmulatorLifecycleManager(
     ) : ManagedEmulatorSession {
         override fun close() {
             if (!process.isAlive) return
-            val result = runner.execute(CommandRequest(listOf(configuration.adbPath.toString(), "-s", serial, "emu", "kill"), configuration.shutdownTimeoutMillis))
+            val result =
+                runner.execute(
+                    CommandRequest(
+                        listOf(configuration.adbPath.toString(), "-s", serial, "emu", "kill"),
+                        configuration.shutdownTimeoutMillis,
+                    ),
+                )
             val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(configuration.shutdownTimeoutMillis)
             while (process.isAlive && System.nanoTime() < deadline) sleeper(100)
-            if (process.isAlive) { process.destroy(); process.waitFor(200, TimeUnit.MILLISECONDS) }
-            if (process.isAlive) { process.destroyForcibly(); process.waitFor(1000, TimeUnit.MILLISECONDS) }
-            if (result.failure != null || result.exitCode != 0 || process.isAlive) throw EmulatorLifecycleException("Owned emulator $serial did not shut down cleanly.")
+            if (process.isAlive) {
+                process.destroy()
+                process.waitFor(200, TimeUnit.MILLISECONDS)
+            }
+            if (process.isAlive) {
+                process.destroyForcibly()
+                process.waitFor(1000, TimeUnit.MILLISECONDS)
+            }
+            if (result.failure != null || result.exitCode != 0 || process.isAlive) {
+                throw EmulatorLifecycleException(
+                    "Owned emulator $serial did not shut down cleanly.",
+                )
+            }
         }
     }
 }
