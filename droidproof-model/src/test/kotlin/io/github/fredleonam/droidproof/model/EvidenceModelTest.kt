@@ -100,6 +100,59 @@ class EvidenceModelTest {
         assertFailsWith<IllegalArgumentException> { ObservedValue() }
         assertFailsWith<IllegalArgumentException> { ObservedValue("value", "reason") }
     }
+
+    @Test
+    fun `transaction mutation model has deterministic outcomes and checkpoint ordering`() {
+        val identity =
+            EmulatorCapabilityObservationV1(
+                apiLevel = 35,
+                buildFingerprint = "generic/sdk",
+                bootIdentifier = "123e4567-e89b-12d3-a456-426614174000",
+                commandSurfaces = listOf("getprop"),
+            )
+        val checkpoint =
+            TransactionMutationCheckpointObservationV1(
+                sequence = 1,
+                checkpoint = TransactionMutationCheckpoint.AFTER_ARTIFACT_BINDING,
+                observedAt = UtcTimestamp("2026-09-17T12:00:00Z"),
+                identity = IdentityMutationObservationV1(MutationObservationOutcome.MATCHED, identity, "Identity matched."),
+                environment =
+                    EnvironmentMutationObservationV1(
+                        MutationObservationOutcome.NOT_EVALUATED,
+                        detail = "No environment contract was present.",
+                    ),
+                artifact =
+                    ArtifactMutationObservationV1(
+                        MutationObservationOutcome.DRIFT_DETECTED,
+                        Sha256("b".repeat(64)),
+                        "Artifact drifted.",
+                    ),
+                outcome = MutationObservationOutcome.DRIFT_DETECTED,
+                detail = "Drift was detected.",
+            )
+        val document =
+            TransactionMutationDocumentV1(
+                baseline =
+                    TransactionMutationBaselineV1(
+                        identity,
+                        artifact =
+                            TransactionArtifactBaselineV1(
+                                "io.droidproof.smoke",
+                                Sha256("a".repeat(64)),
+                                Sha256("a".repeat(64)),
+                            ),
+                    ),
+                checkpoints = listOf(checkpoint),
+                outcome = MutationObservationOutcome.DRIFT_DETECTED,
+                explanation = "Sequential bounded observations detected drift.",
+            )
+
+        assertTrue(Json.encodeToString(TransactionMutationDocumentV1.serializer(), document).contains("DRIFT_DETECTED"))
+        assertFailsWith<IllegalArgumentException> { document.copy(outcome = MutationObservationOutcome.MATCHED) }
+        assertFailsWith<IllegalArgumentException> {
+            document.copy(checkpoints = listOf(checkpoint.copy(sequence = 2)))
+        }
+    }
 }
 
 internal fun sampleManifest() =

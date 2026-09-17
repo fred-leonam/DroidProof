@@ -22,6 +22,8 @@ import io.github.fredleonam.droidproof.mockserver.RequestContractOutcome
 import io.github.fredleonam.droidproof.mockserver.RunningMockServer
 import io.github.fredleonam.droidproof.model.BundleRelativePath
 import io.github.fredleonam.droidproof.model.DroidProofVersion
+import io.github.fredleonam.droidproof.model.EmulatorCapabilityObservationV1
+import io.github.fredleonam.droidproof.model.EnvironmentExecutionMode
 import io.github.fredleonam.droidproof.model.EventSource
 import io.github.fredleonam.droidproof.model.EvidenceBundleManifestV3
 import io.github.fredleonam.droidproof.model.EvidenceCompleteness
@@ -148,6 +150,52 @@ class NetworkExecutionTest {
     }
 
     @Test
+    fun `drift after launch still cleans owned network resources and restores environment`() {
+        var probes = 0
+        val handle = FakeRunningServer(emptyList())
+        val store = FileEmulatorRecoveryJournalStore(directory.resolve("drift-recovery"))
+        val device =
+            object : FakeSmokeDevice() {
+                override fun probeCapabilities(
+                    serial: String,
+                    timeoutMillis: Long,
+                ): DeviceCall<EmulatorCapabilityObservationV1> {
+                    probes++
+                    if (probes == 3) {
+                        capabilityResult =
+                            DeviceCall(
+                                requireNotNull(capabilityResult.value).copy(
+                                    bootIdentifier = "223e4567-e89b-12d3-a456-426614174000",
+                                ),
+                            )
+                    }
+                    return super.probeCapabilities(serial, timeoutMillis)
+                }
+            }
+        val request =
+            request("drift-cleanup").copy(
+                environmentPath =
+                    directory.resolve("drift-cleanup-environment.json").also {
+                        Files.writeString(
+                            it,
+                            """{"schemaVersion":1,"locale":"en-US","orientation":"PORTRAIT","animations":""" +
+                                """{"windowScale":0.0,"transitionScale":0.0,"animatorScale":0.0}}""",
+                        )
+                    },
+                environmentMode = EnvironmentExecutionMode.APPLY_AND_RESTORE,
+            )
+
+        val result = coordinator(device, handle, recoveryJournalStore = store).run(request)
+
+        assertEquals(ExecutionStatus.ERROR, result.document?.status)
+        assertTrue(handle.stopped)
+        assertTrue(device.operations.any { it.startsWith("reverse-remove:") })
+        assertTrue(device.operations.any { it.startsWith("restore:") })
+        assertEquals(RecoveryJournalPhase.RESTORED_VERIFIED, requireNotNull(store.load("emulator-5554")).phase)
+        assertTrue(result.bundleIntegrityValid)
+    }
+
+    @Test
     fun `v4 requires every retry request contract to match`() {
         val matched =
             coordinator(networkDevice(true), FakeRunningServer(successfulRequestContractExchanges()))
@@ -234,6 +282,8 @@ class NetworkExecutionTest {
         device: FakeSmokeDevice,
         handle: FakeRunningServer,
         cancellation: CancellationSignal = CancellationSignal { false },
+        recoveryJournalStore: EmulatorRecoveryJournalStore =
+            FileEmulatorRecoveryJournalStore(directory.resolve("recovery")),
     ): SmokeCoordinator {
         val monotonic = FakeMonotonicClock()
         var hierarchyId = 0
@@ -254,6 +304,7 @@ class NetworkExecutionTest {
             assertionRunner = assertion,
             mockServerStarter = MockServerStarter { _: MockServerPlan, _: MockServerLimits -> handle },
             idSource = { "run-network" },
+            recoveryJournalStore = recoveryJournalStore,
         )
     }
 

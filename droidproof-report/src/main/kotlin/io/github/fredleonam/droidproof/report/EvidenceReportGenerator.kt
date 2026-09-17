@@ -20,6 +20,7 @@ import io.github.fredleonam.droidproof.model.EvidenceFileRole
 import io.github.fredleonam.droidproof.model.ObservedExecutionEnvironment
 import io.github.fredleonam.droidproof.model.ObservedValue
 import io.github.fredleonam.droidproof.model.TimelineDocument
+import io.github.fredleonam.droidproof.model.TransactionMutationDocumentV1
 import kotlinx.serialization.decodeFromString
 import java.net.URI
 import java.nio.charset.StandardCharsets
@@ -128,6 +129,7 @@ class EvidenceReportGenerator {
                 append(environmentTransactionSection(bundle, manifest.evidenceFiles))
                 append(capabilitySection(bundle, manifest.evidenceFiles))
                 append(continuitySection(bundle, manifest.evidenceFiles))
+                append(transactionMutationSection(bundle, manifest.evidenceFiles))
                 append(timelineSection(timeline, manifest.evidenceFiles, links, integrityBound = true))
                 append(networkSection(timeline, manifest.evidenceFiles, links))
                 append(screenshotSection(manifest.evidenceFiles, links))
@@ -386,6 +388,61 @@ class EvidenceReportGenerator {
                     "The cooperative lease cannot prevent Android Studio, humans, or arbitrary ADB processes " +
                     "from changing the emulator; sequential observations do not prove uninterrupted state stability.</p></section>",
             )
+        }
+    }
+
+    private fun transactionMutationSection(
+        bundle: Path,
+        inventory: List<EvidenceFileDescriptor>,
+    ): String {
+        val path = BundleRelativePath("environment/transaction-continuity.json")
+        val descriptor = inventory.singleOrNull { it.path == path && it.mediaType == "application/json" } ?: return ""
+        val value =
+            evidenceJson.decodeFromString<TransactionMutationDocumentV1>(
+                Files.readString(bundle.resolve(descriptor.path.value), StandardCharsets.UTF_8),
+            )
+        val boundary =
+            if (value.outcome.name == "DRIFT_DETECTED") {
+                "The evidence shows that sequential bounded observations detected drift."
+            } else {
+                "These are sequential bounded observations at recorded checkpoints."
+            }
+        return buildString {
+            appendLine("<section><h2>Transaction mutation observations</h2><dl class=\"summary\">")
+            append(rowHtml("Overall outcome", badge(value.outcome.name)))
+            append(row("Initial API level", value.baseline.identity.apiLevel.toString()))
+            append(row("Initial build fingerprint", value.baseline.identity.buildFingerprint))
+            append(row("Initial boot identifier", value.baseline.identity.bootIdentifier))
+            append(row("Initial environment", value.baseline.environment?.outcome?.name ?: "Not evaluated"))
+            append(row("Target package", value.baseline.artifact?.packageName ?: "Not established"))
+            append(row("Bound APK SHA-256", value.baseline.artifact?.installedApkSha256?.value ?: "Not established"))
+            appendLine("</dl><p>${Html.escape(value.explanation)}</p>")
+            appendLine(
+                "<p><strong>Proof boundary:</strong> ${Html.escape(boundary)} " +
+                    "They are not continuous monitoring, do not establish exclusive emulator ownership, and do not " +
+                    "identify who or what caused a change.</p>",
+            )
+            if (value.checkpoints.isEmpty()) {
+                appendLine("<p>No bounded checkpoint was reached.</p>")
+            } else {
+                appendLine(
+                    "<div class=\"table-scroll\"><table><thead><tr><th>Sequence</th><th>Checkpoint</th>" +
+                        "<th>Identity</th><th>Environment</th><th>Artifact</th><th>Overall</th></tr></thead><tbody>",
+                )
+                value.checkpoints.forEach { checkpoint ->
+                    val checkpointName =
+                        checkpoint.checkpoint.name +
+                            checkpoint.afterScenarioStep?.let { " ($it)" }.orEmpty()
+                    append("<tr><td>${Html.escape(checkpoint.sequence.toString())}</td>")
+                    append("<td>${Html.escape(checkpointName)}</td>")
+                    append("<td>${Html.escape(checkpoint.identity.outcome.name)}</td>")
+                    append("<td>${Html.escape(checkpoint.environment.outcome.name)}</td>")
+                    append("<td>${Html.escape(checkpoint.artifact.outcome.name)}</td>")
+                    appendLine("<td>${Html.escape(checkpoint.outcome.name)}</td></tr>")
+                }
+                appendLine("</tbody></table></div>")
+            }
+            appendLine("</section>")
         }
     }
 

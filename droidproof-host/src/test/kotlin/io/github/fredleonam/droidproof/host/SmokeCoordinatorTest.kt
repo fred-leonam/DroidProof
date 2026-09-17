@@ -18,6 +18,7 @@ import io.github.fredleonam.droidproof.evidence.Sha256Calculator
 import io.github.fredleonam.droidproof.evidence.evidenceJson
 import io.github.fredleonam.droidproof.model.BundleRelativePath
 import io.github.fredleonam.droidproof.model.DroidProofVersion
+import io.github.fredleonam.droidproof.model.EmulatorCapabilityObservationV1
 import io.github.fredleonam.droidproof.model.EmulatorEnvironmentEvaluationV1
 import io.github.fredleonam.droidproof.model.EnvironmentEvaluationOutcome
 import io.github.fredleonam.droidproof.model.EnvironmentExecutionMode
@@ -25,9 +26,12 @@ import io.github.fredleonam.droidproof.model.EvidenceBundleManifestV3
 import io.github.fredleonam.droidproof.model.EvidenceCompleteness
 import io.github.fredleonam.droidproof.model.EvidenceFileRole
 import io.github.fredleonam.droidproof.model.ExecutionStatus
+import io.github.fredleonam.droidproof.model.MutationObservationOutcome
 import io.github.fredleonam.droidproof.model.Orientation
 import io.github.fredleonam.droidproof.model.ScenarioVerdict
 import io.github.fredleonam.droidproof.model.TimelineDocument
+import io.github.fredleonam.droidproof.model.TransactionMutationCheckpoint
+import io.github.fredleonam.droidproof.model.TransactionMutationDocumentV1
 import kotlinx.serialization.decodeFromString
 import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Files
@@ -80,6 +84,185 @@ class SmokeCoordinatorTest {
         assertEquals(Sha256Calculator.calculate(bundle.resolve("scenario/scenario.json")), manifest.scenario.dataSha256)
         assertFalse(Files.exists(bundle.parent.resolve("work")))
         assertFalse(Files.exists(bundle.resolve("input.apk")))
+    }
+
+    @Test
+    fun `all bounded transaction checkpoints match and are inventory and timeline bound`() {
+        val device = FakeSmokeDevice().apply { dumps += DumpResponse(FakeSmokeDevice.MATCHING_XML) }
+
+        val result = coordinator(device, completeCapture()).run(request("mutation-match"))
+        val bundle = requireNotNull(result.output)
+        val document =
+            evidenceJson.decodeFromString<TransactionMutationDocumentV1>(
+                Files.readString(bundle.resolve("environment/transaction-continuity.json")),
+            )
+
+        assertEquals(MutationObservationOutcome.MATCHED, document.outcome)
+        assertEquals(
+            listOf(
+                TransactionMutationCheckpoint.AFTER_ARTIFACT_BINDING,
+                TransactionMutationCheckpoint.AFTER_LAUNCH,
+                TransactionMutationCheckpoint.AFTER_SCENARIO_STEP,
+                TransactionMutationCheckpoint.BEFORE_FINAL_CAPTURE,
+                TransactionMutationCheckpoint.AFTER_FINAL_CAPTURE,
+            ),
+            document.checkpoints.map { it.checkpoint },
+        )
+        assertTrue(document.checkpoints.all { it.environment.outcome == MutationObservationOutcome.NOT_EVALUATED })
+        val manifest = evidenceJson.decodeFromString<EvidenceBundleManifestV3>(Files.readString(bundle.resolve("manifest.json")))
+        assertTrue(manifest.evidenceFiles.any { it.path.value == "environment/transaction-continuity.json" })
+        val timeline = evidenceJson.decodeFromString<TimelineDocument>(Files.readString(bundle.resolve("timeline.json")))
+        assertEquals(
+            "environment/transaction-continuity.json",
+            timeline.events.single { it.type == "execution.transaction_continuity" }.evidence.single().path.value,
+        )
+        assertTrue(EvidenceBundleVerifier().verify(bundle).isValid)
+    }
+
+    @Test
+    fun `emulator identity drift after launch stops scenario actions`() {
+        var probes = 0
+        val device =
+            object : FakeSmokeDevice() {
+                override fun probeCapabilities(
+                    serial: String,
+                    timeoutMillis: Long,
+                ): DeviceCall<EmulatorCapabilityObservationV1> {
+                    probes++
+                    if (probes == 3) {
+                        capabilityResult =
+                            DeviceCall(
+                                requireNotNull(capabilityResult.value).copy(
+                                    bootIdentifier = "223e4567-e89b-12d3-a456-426614174000",
+                                ),
+                            )
+                    }
+                    return super.probeCapabilities(serial, timeoutMillis)
+                }
+            }
+
+        val result = coordinator(device, DeviceEvidenceCapture { error("capture must not run") }).run(request("identity-drift"))
+        val document = mutationDocument(requireNotNull(result.output))
+
+        assertEquals(ExecutionStatus.ERROR, result.document?.status)
+        assertEquals(MutationObservationOutcome.DRIFT_DETECTED, document.outcome)
+        assertEquals(MutationObservationOutcome.DRIFT_DETECTED, document.checkpoints.last().identity.outcome)
+        assertTrue(device.operations.none { it.startsWith("dump:") || it.startsWith("tap:") })
+    }
+
+    @Test
+    fun `requested environment drift stops scenario actions`() {
+        var localeObservations = 0
+        val device =
+            object : FakeSmokeDevice() {
+                override fun observeLocale(
+                    serial: String,
+                    timeoutMillis: Long,
+                ): DeviceCall<DeviceLocaleObservation> {
+                    localeObservations++
+                    if (localeObservations == 3) {
+                        localeResult = DeviceCall(DeviceLocaleObservation("pt-BR", "pt-BR"))
+                    }
+                    return super.observeLocale(serial, timeoutMillis)
+                }
+            }
+
+        val result =
+            coordinator(device, DeviceEvidenceCapture { error("capture must not run") })
+                .run(environmentRequest("environment-drift"))
+        val document = mutationDocument(requireNotNull(result.output))
+
+        assertEquals(ExecutionStatus.ERROR, result.document?.status)
+        assertEquals(MutationObservationOutcome.DRIFT_DETECTED, document.checkpoints.last().environment.outcome)
+        assertTrue(device.operations.none { it.startsWith("dump:") || it.startsWith("tap:") })
+    }
+
+    @Test
+    fun `target APK binding drift stops scenario actions`() {
+        var pathQueries = 0
+        val device =
+            object : FakeSmokeDevice() {
+                override fun packagePaths(
+                    serial: String,
+                    packageName: String,
+                    timeoutMillis: Long,
+                ): DeviceCall<InstalledPackagePaths> {
+                    pathQueries++
+                    if (pathQueries == 4) installedBytes = listOf("externally changed APK".toByteArray())
+                    return super.packagePaths(serial, packageName, timeoutMillis)
+                }
+            }
+
+        val result = coordinator(device, DeviceEvidenceCapture { error("capture must not run") }).run(request("artifact-drift"))
+        val document = mutationDocument(requireNotNull(result.output))
+
+        assertEquals(ExecutionStatus.ERROR, result.document?.status)
+        assertEquals(MutationObservationOutcome.DRIFT_DETECTED, document.checkpoints.last().artifact.outcome)
+        assertTrue(device.operations.none { it.startsWith("dump:") || it.startsWith("tap:") })
+    }
+
+    @Test
+    fun `unavailable checkpoint identity stops scenario actions with explicit evidence`() {
+        var probes = 0
+        val device =
+            object : FakeSmokeDevice() {
+                override fun probeCapabilities(
+                    serial: String,
+                    timeoutMillis: Long,
+                ): DeviceCall<EmulatorCapabilityObservationV1> {
+                    probes++
+                    if (probes == 3) {
+                        capabilityResult =
+                            DeviceCall(
+                                failure = DeviceFailureKind.DISCONNECTED,
+                                detail = "private disconnected output",
+                            )
+                    }
+                    return super.probeCapabilities(serial, timeoutMillis)
+                }
+            }
+
+        val result = coordinator(device, DeviceEvidenceCapture { error("capture must not run") }).run(request("identity-unavailable"))
+        val bundle = requireNotNull(result.output)
+        val document = mutationDocument(bundle)
+
+        assertEquals(ExecutionStatus.ERROR, result.document?.status)
+        assertEquals(MutationObservationOutcome.UNAVAILABLE, document.outcome)
+        assertEquals(MutationObservationOutcome.UNAVAILABLE, document.checkpoints.last().identity.outcome)
+        assertFalse(Files.readString(bundle.resolve("environment/transaction-continuity.json")).contains("private disconnected output"))
+        assertTrue(device.operations.none { it.startsWith("dump:") || it.startsWith("tap:") })
+    }
+
+    @Test
+    fun `drift after a scenario step skips every remaining action`() {
+        var probes = 0
+        val device =
+            object : FakeSmokeDevice() {
+                override fun probeCapabilities(
+                    serial: String,
+                    timeoutMillis: Long,
+                ): DeviceCall<EmulatorCapabilityObservationV1> {
+                    probes++
+                    if (probes == 4) {
+                        capabilityResult =
+                            DeviceCall(
+                                requireNotNull(capabilityResult.value).copy(
+                                    buildFingerprint = "external/changed",
+                                ),
+                            )
+                    }
+                    return super.probeCapabilities(serial, timeoutMillis)
+                }
+            }.apply {
+                dumps += DumpResponse(TAP_XML)
+            }
+
+        val result = coordinator(device, completeCapture()).run(interactiveRequest("step-drift", repeatTap = true))
+
+        assertEquals(ExecutionStatus.ERROR, result.document?.status)
+        assertEquals(listOf(StepStatus.SUCCEEDED, StepStatus.SKIPPED, StepStatus.SKIPPED), result.document?.steps?.map { it.status })
+        assertEquals(1, device.operations.count { it.startsWith("tap:") })
+        assertEquals(1, device.operations.count { it.startsWith("dump:") })
     }
 
     @Test
@@ -307,7 +490,7 @@ class SmokeCoordinatorTest {
                     timeoutMillis: Long,
                 ): DeviceCall<InstalledPackagePaths> {
                     val result = super.packagePaths(serial, packageName, timeoutMillis)
-                    clock.advanceMillis(30_000)
+                    clock.advanceMillis(4_000_000)
                     return result
                 }
             }
@@ -395,8 +578,13 @@ class SmokeCoordinatorTest {
         val operations = device.operations.map { it.substringBefore(':') }
         assertEquals(
             listOf(
-                "preflight", "capabilities", "paths", "install", "paths", "pull", "launch", "dump", "tap",
-                "dump", "capture", "paths", "pull",
+                "preflight", "capabilities", "paths", "install", "paths", "pull",
+                "capabilities", "paths", "pull",
+                "launch", "capabilities", "paths", "pull",
+                "dump", "tap", "capabilities", "paths", "pull",
+                "dump", "capabilities", "paths", "pull",
+                "capabilities", "paths", "pull",
+                "capture", "capabilities", "paths", "pull",
             ),
             operations,
         )
@@ -559,6 +747,7 @@ class SmokeCoordinatorTest {
                 "execution.capture",
                 "execution.environment_continuity",
                 "execution.finalization",
+                "execution.transaction_continuity",
             ),
             timeline.events.map { it.type },
         )
@@ -679,8 +868,14 @@ class SmokeCoordinatorTest {
         assertTrue(result.isSuccessful)
         assertEquals(
             listOf(
-                "preflight", "capabilities", "paths", "install", "paths", "pull", "launch", "dump", "tap", "input",
-                "dump", "tap", "dump", "capture", "paths", "pull",
+                "preflight", "capabilities", "paths", "install", "paths", "pull",
+                "capabilities", "paths", "pull",
+                "launch", "capabilities", "paths", "pull",
+                "dump", "tap", "input", "capabilities", "paths", "pull",
+                "dump", "tap", "capabilities", "paths", "pull",
+                "dump", "capabilities", "paths", "pull",
+                "capabilities", "paths", "pull",
+                "capture", "capabilities", "paths", "pull",
             ),
             device.operations.map { it.substringBefore(':') },
         )
@@ -827,6 +1022,11 @@ class SmokeCoordinatorTest {
             }
         }
     }
+
+    private fun mutationDocument(bundle: Path): TransactionMutationDocumentV1 =
+        evidenceJson.decodeFromString(
+            Files.readString(bundle.resolve("environment/transaction-continuity.json")),
+        )
 
     private fun assertionRunner(
         device: FakeSmokeDevice,

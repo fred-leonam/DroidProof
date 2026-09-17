@@ -37,12 +37,15 @@ import io.github.fredleonam.droidproof.model.EvidenceFileRole
 import io.github.fredleonam.droidproof.model.EvidenceReference
 import io.github.fredleonam.droidproof.model.ExecutionStatus
 import io.github.fredleonam.droidproof.model.ExecutionSummary
+import io.github.fredleonam.droidproof.model.MutationObservationOutcome
 import io.github.fredleonam.droidproof.model.ObservedExecutionEnvironment
 import io.github.fredleonam.droidproof.model.ObservedValue
 import io.github.fredleonam.droidproof.model.RequestedExecutionConfiguration
 import io.github.fredleonam.droidproof.model.ScenarioIdentity
 import io.github.fredleonam.droidproof.model.ScenarioVerdict
 import io.github.fredleonam.droidproof.model.TimelineEvent
+import io.github.fredleonam.droidproof.model.TransactionMutationCheckpoint
+import io.github.fredleonam.droidproof.model.TransactionMutationDocumentV1
 import io.github.fredleonam.droidproof.model.UtcTimestamp
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
@@ -125,6 +128,9 @@ class SmokeCoordinator(
                 val overallBudget =
                     scenario.scenario.orderedSteps.filterIsInstance<AssertUiNode>().sumOf { it.deadlineMillis } +
                         scenario.scenario.orderedSteps.sumOf { it.stepType.deviceOperationCount } * request.commandTimeoutMillis +
+                        (scenario.scenario.orderedSteps.size + FIXED_MUTATION_CHECKPOINTS) *
+                        mutationCheckpointOperationCount(environment != null) *
+                        request.commandTimeoutMillis +
                         request.commandTimeoutMillis * MAX_DEVICE_OPERATIONS +
                         FINALIZATION_BUDGET_MILLIS
                 state.overallDeadlineNanos =
@@ -258,8 +264,35 @@ class SmokeCoordinator(
                 state.skip(ExecutionStage.ENVIRONMENT, detail)
             }
 
+            val mutationRecorder =
+                if (inputs != null && capabilities != null) {
+                    TransactionMutationRecorder(device, requireNotNull(capabilities), environmentEvaluation, wallClock)
+                } else {
+                    null
+                }
             var bindingAttempt: BindingAttempt? = null
             var bindingState: ArtifactBindingState? = null
+
+            fun observeMutationCheckpoint(
+                checkpoint: TransactionMutationCheckpoint,
+                afterScenarioStep: Int? = null,
+            ) {
+                val attempt =
+                    requireNotNull(mutationRecorder).observe(
+                        checkpoint,
+                        afterScenarioStep,
+                        request.deviceSerial,
+                        requireNotNull(inputs).environment?.contract,
+                        requireNotNull(bindingState),
+                    ) { operationTimeout(request, state) }
+                if (checkpoint == TransactionMutationCheckpoint.AFTER_FINAL_CAPTURE) {
+                    bindingState = attempt.bindingState
+                }
+                if (attempt.checkpoint.outcome != MutationObservationOutcome.MATCHED) {
+                    throw RunAbort(attempt.checkpoint.detail, attempt.cancelled)
+                }
+            }
+
             if (inputs != null && state.canUseDevice()) {
                 stage<Unit>(state, ExecutionStage.ARTIFACT_BINDING) {
                     val binder = ArtifactBinder(device, wallClock)
@@ -275,6 +308,8 @@ class SmokeCoordinator(
                         throw RunAbort(attempt.error, attempt.cancelled)
                     }
                     bindingState = requireNotNull(attempt.state)
+                    requireNotNull(mutationRecorder).bindArtifact(inputs.scenario.scenario.expectedPackage, requireNotNull(bindingState))
+                    observeMutationCheckpoint(TransactionMutationCheckpoint.AFTER_ARTIFACT_BINDING)
                 }
             } else {
                 state.skip(ExecutionStage.ARTIFACT_BINDING)
@@ -318,6 +353,7 @@ class SmokeCoordinator(
                             operationTimeout(request, state),
                         )
                     if (!result.isSuccessful) abort(result.detail ?: "Activity launch failed.", result.failure)
+                    observeMutationCheckpoint(TransactionMutationCheckpoint.AFTER_LAUNCH)
                 }
             } else {
                 state.skip(ExecutionStage.LAUNCH)
@@ -325,7 +361,9 @@ class SmokeCoordinator(
 
             if (state.canUseDevice() && inputs != null) {
                 stage<Unit>(state, ExecutionStage.ASSERTION) {
-                    executeSteps(request, state, inputs.scenario.scenario, workDirectory)
+                    executeSteps(request, state, inputs.scenario.scenario, workDirectory) { step ->
+                        observeMutationCheckpoint(TransactionMutationCheckpoint.AFTER_SCENARIO_STEP, step)
+                    }
                 }
             } else {
                 state.skip(ExecutionStage.ASSERTION)
@@ -336,32 +374,19 @@ class SmokeCoordinator(
             var captureResult: CaptureResult? = null
             if (state.canUseDevice() && inputs != null) {
                 captureResult =
-                    captureStage(request, state, workDirectory).also { result ->
+                    captureStage(request, state, workDirectory) {
+                        observeMutationCheckpoint(TransactionMutationCheckpoint.BEFORE_FINAL_CAPTURE)
+                    }.also { result ->
                         val fatal = result?.document?.issues?.firstOrNull { it.code in FATAL_CAPTURE_ISSUES }
                         if (fatal != null) state.failAfterStage(fatal.message, fatal.code == CollectionIssueCode.INTERRUPTED)
                     }
                 if (state.canUseDevice() && bindingState != null) {
                     try {
-                        val currentBinding = requireNotNull(bindingState)
-                        val finalCheck =
-                            ArtifactBinder(device, wallClock).finalCheck(
-                                currentBinding,
-                                request.deviceSerial,
-                                inputs.scenario.scenario.expectedPackage,
-                            ) { operationTimeout(request, state) }
-                        bindingState = finalCheck.state
-                        val finalDigest = bindingState?.afterCapture?.sha256
-                        if (finalDigest != inputs.artifact.sha256) {
-                            state.failAfterStage(
-                                bindingState?.afterCapture?.unavailableReason
-                                    ?: "Installed APK bytes changed after assertion and capture.",
-                                finalCheck.cancelled,
-                            )
-                        }
+                        observeMutationCheckpoint(TransactionMutationCheckpoint.AFTER_FINAL_CAPTURE)
                     } catch (error: RunAbort) {
-                        state.failAfterStage(error.message ?: "Final artifact identity check failed.", error.cancelled)
+                        state.failAfterStage(error.message ?: "Final transaction observation failed.", error.cancelled)
                     } catch (_: Exception) {
-                        state.failAfterStage("Final artifact identity check failed.")
+                        state.failAfterStage("Final transaction observation failed.")
                     }
                 }
             } else {
@@ -556,6 +581,7 @@ class SmokeCoordinator(
                     environmentTransaction,
                     capabilities,
                     continuity,
+                    mutationRecorder?.document(),
                     state,
                 )
             deleteWorkDirectory(workDirectory)
@@ -582,6 +608,7 @@ class SmokeCoordinator(
         state: MutableExecutionState,
         scenario: ScenarioDefinition,
         workDirectory: Path,
+        afterStep: (Int) -> Unit,
     ) {
         try {
             for ((index, step) in scenario.orderedSteps.withIndex()) {
@@ -596,6 +623,7 @@ class SmokeCoordinator(
                     }
                 var retained: BundleRelativePath? = null
                 var document: AssertionDocument? = null
+                var stepRecorded = false
                 try {
                     operationTimeout(request, state)
                     val stepDirectory = Files.createDirectories(workDirectory.resolve("steps/$index"))
@@ -653,6 +681,8 @@ class SmokeCoordinator(
                         StepOutcome(
                             index + 1, type, status, started, wallClock.instant().toString(), document?.detail, retained, document,
                         )
+                    stepRecorded = true
+                    afterStep(index + 1)
                     if (status == StepStatus.ASSERTION_FAILED) break
                 } catch (error: Exception) {
                     val cancelled = error is RunAbort && error.cancelled
@@ -662,11 +692,13 @@ class SmokeCoordinator(
                             is HierarchyValidationException -> error.message ?: "UI hierarchy was invalid."
                             else -> "Step execution failed before a trustworthy result was available."
                         }
-                    state.steps +=
-                        StepOutcome(
-                            index + 1, type, if (cancelled) StepStatus.CANCELLED else StepStatus.ERROR,
-                            started, wallClock.instant().toString(), detail, retained, document,
-                        )
+                    if (!stepRecorded) {
+                        state.steps +=
+                            StepOutcome(
+                                index + 1, type, if (cancelled) StepStatus.CANCELLED else StepStatus.ERROR,
+                                started, wallClock.instant().toString(), detail, retained, document,
+                            )
+                    }
                     throw RunAbort(detail, cancelled)
                 }
             }
@@ -694,10 +726,12 @@ class SmokeCoordinator(
         request: SmokeRunRequest,
         state: MutableExecutionState,
         workDirectory: Path,
+        beforeCapture: () -> Unit,
     ): CaptureResult? {
         val stageStarted = wallClock.instant().toString()
         return try {
             ensureActive()
+            beforeCapture()
             val timeout = operationTimeout(request, state)
             val result =
                 capture.capture(
@@ -760,6 +794,7 @@ class SmokeCoordinator(
         environmentTransaction: EnvironmentTransactionDocument?,
         capabilities: EmulatorCapabilityObservationV1?,
         continuity: EmulatorContinuityDocumentV1?,
+        mutationDocument: TransactionMutationDocumentV1?,
         state: MutableExecutionState,
     ): SmokeRunResult {
         val finalizationStarted = wallClock.instant().toString()
@@ -778,10 +813,11 @@ class SmokeCoordinator(
         val environmentRestored =
             (environmentTransaction?.restorationOutcome ?: EnvironmentRestorationOutcome.NOT_REQUIRED) in
                 setOf(EnvironmentRestorationOutcome.NOT_REQUIRED, EnvironmentRestorationOutcome.RESTORED)
+        val mutationComplete = mutationDocument?.outcome == MutationObservationOutcome.MATCHED
         val completeness =
             if (
                 evaluated && hierarchy != null && screenshot != null && finalBindingMatches && environmentComplete &&
-                environmentRestored &&
+                environmentRestored && mutationComplete &&
                 networkEvaluation?.outcome != NetworkEvaluationOutcome.NOT_EVALUATED
             ) {
                 EvidenceCompleteness.COMPLETE
@@ -846,6 +882,7 @@ class SmokeCoordinator(
                     environmentTransaction,
                     capabilities = capabilities,
                     continuity = continuity,
+                    mutationDocument = mutationDocument,
                 )
             val manifest =
                 manifest(request, executionId, accepted, binding, bindingState, captureResult, environmentEvaluation, resultDocument)
@@ -853,7 +890,15 @@ class SmokeCoordinator(
             publisher.publish(
                 EvidenceBundleRequestV3(
                     manifest,
-                    timeline(resultDocument, networkEvents, environmentEvaluation, environmentTransaction, capabilities, continuity),
+                    timeline(
+                        resultDocument,
+                        networkEvents,
+                        environmentEvaluation,
+                        environmentTransaction,
+                        capabilities,
+                        continuity,
+                        mutationDocument,
+                    ),
                     sources,
                 ),
                 bundle,
@@ -893,6 +938,7 @@ class SmokeCoordinator(
         environmentTransaction: EnvironmentTransactionDocument?,
         capabilities: EmulatorCapabilityObservationV1?,
         continuity: EmulatorContinuityDocumentV1?,
+        mutationDocument: TransactionMutationDocumentV1?,
     ): List<EvidenceFileInput> {
         val documents = Files.createDirectories(workDirectory.resolve("documents"))
         val scenario = documents.resolve("scenario.json").also { Files.write(it, accepted.scenario.exactBytes) }
@@ -925,6 +971,10 @@ class SmokeCoordinator(
         capabilities?.let { capability ->
             val capabilityFile = documents.resolve("capabilities.json").also { writeJson(it, capability) }
             files += EvidenceFileInput(capabilityFile, ENVIRONMENT_CAPABILITIES_PATH, "application/json", EvidenceFileRole.TEST_RESULT)
+        }
+        mutationDocument?.let { mutation ->
+            val mutationFile = documents.resolve("transaction-continuity.json").also { writeJson(it, mutation) }
+            files += EvidenceFileInput(mutationFile, TRANSACTION_MUTATION_PATH, "application/json", EvidenceFileRole.TEST_RESULT)
         }
         captureResult?.let { captured ->
             files +=
@@ -1033,6 +1083,7 @@ class SmokeCoordinator(
         environmentTransaction: EnvironmentTransactionDocument?,
         capabilities: EmulatorCapabilityObservationV1?,
         continuity: EmulatorContinuityDocumentV1?,
+        mutationDocument: TransactionMutationDocumentV1?,
     ): List<TimelineEvent> =
         result.stages.flatMapIndexed { stageIndex, stage ->
             val stageNumber = (stageIndex + 1).toString().padStart(3, '0')
@@ -1093,7 +1144,21 @@ class SmokeCoordinator(
                     attributes = mapOf("status" to stage.status.name),
                     evidence = evidence,
                 )
-        } + networkEvents
+        } + networkEvents +
+            mutationDocument?.let { mutation ->
+                TimelineEvent(
+                    EventId("transaction-mutation-observations"),
+                    UtcTimestamp(result.hostEndedAt),
+                    EventSource.HOST,
+                    "execution.transaction_continuity",
+                    attributes =
+                        mapOf(
+                            "outcome" to mutation.outcome.name,
+                            "checkpointCount" to mutation.checkpoints.size.toString(),
+                        ),
+                    evidence = listOf(EvidenceReference(TRANSACTION_MUTATION_PATH, "application/json")),
+                )
+            }.let(::listOfNotNull)
 
     private fun manifestObservation(
         observation: EnvironmentObservation?,
@@ -1273,6 +1338,7 @@ class SmokeCoordinator(
 
     private companion object {
         const val MAX_DEVICE_OPERATIONS = 12L
+        const val FIXED_MUTATION_CHECKPOINTS = 4
         const val FINALIZATION_BUDGET_MILLIS = 15_000L
         const val MAX_OVERALL_BUDGET_MILLIS = 3_600_000L
         val SAFE_RUN_ID = Regex("[a-z0-9]+(?:-[a-z0-9]+)*")
@@ -1284,6 +1350,7 @@ class SmokeCoordinator(
         val ENVIRONMENT_TRANSACTION_PATH = BundleRelativePath("environment/transaction.json")
         val ENVIRONMENT_CAPABILITIES_PATH = BundleRelativePath("environment/capabilities.json")
         val ENVIRONMENT_CONTINUITY_PATH = BundleRelativePath("environment/continuity.json")
+        val TRANSACTION_MUTATION_PATH = BundleRelativePath("environment/transaction-continuity.json")
         val HIERARCHY_PATH = BundleRelativePath("ui/hierarchy.xml")
         val CAPTURE_PATH = BundleRelativePath("capture/capture.json")
         val SCREENSHOT_PATH = BundleRelativePath("screenshots/display.png")
@@ -1295,6 +1362,8 @@ class SmokeCoordinator(
                 CollectionIssueCode.TIMEOUT,
                 CollectionIssueCode.INTERRUPTED,
             )
+
+        fun mutationCheckpointOperationCount(hasEnvironmentContract: Boolean): Long = if (hasEnvironmentContract) 6L else 3L
     }
 }
 

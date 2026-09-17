@@ -207,6 +207,30 @@ class EvidenceReportGeneratorTest {
     }
 
     @Test
+    fun `verified transaction mutation evidence renders bounded drift and tampering fails closed`() {
+        val bundle = writeV3Bundle("mutation-report", includeMutation = true)
+        val report = directory.resolve("mutation-report.html")
+
+        generator.generate(bundle, report)
+        assertContainsAll(
+            report.readText(),
+            "Transaction mutation observations",
+            "DRIFT_DETECTED",
+            "sequential bounded observations detected drift",
+            "not continuous monitoring",
+            "do not establish exclusive emulator ownership",
+            "AFTER_LAUNCH",
+        )
+
+        bundle.resolve("environment/transaction-continuity.json").writeText("{}\n")
+        val diagnostic = directory.resolve("mutation-tampered.html")
+        generator.generate(bundle, diagnostic)
+        assertContainsAll(diagnostic.readText(), "Bundle verification failed", "SHA256_MISMATCH")
+        assertFalse(diagnostic.readText().contains("Transaction mutation observations"))
+        assertFalse(diagnostic.readText().contains("sequential bounded observations detected drift"))
+    }
+
+    @Test
     fun `verified request contract mismatch is explained without rendering body bytes`() {
         val bundle =
             writeV3Bundle(
@@ -405,6 +429,7 @@ class EvidenceReportGeneratorTest {
         requestContractIssues: String = "",
         signing: KeyPair? = null,
         includeEnvironment: Boolean = false,
+        includeMutation: Boolean = false,
     ): Path {
         val result = source("$name-result.json", "{}\n")
         val binding = source("$name-binding.json", "{}\n")
@@ -425,6 +450,31 @@ class EvidenceReportGeneratorTest {
                     EvidenceFileInput(
                         environment,
                         BundleRelativePath("environment/evaluation.json"),
+                        "application/json",
+                        EvidenceFileRole.TEST_RESULT,
+                    ),
+                )
+            } else {
+                emptyList()
+            }
+        val mutation =
+            source(
+                "$name-mutation.json",
+                """{"mutationObservationSchemaVersion":1,"baseline":{"identity":{"capabilitySchemaVersion":1,"apiLevel":35,"buildFingerprint":"generic/sdk","bootIdentifier":"123e4567-e89b-12d3-a456-426614174000","commandSurfaces":["getprop"]},"artifact":{"packageName":"io.example.report","inputApkSha256":"${"a".repeat(
+                    64,
+                )}","installedApkSha256":"${"a".repeat(
+                    64,
+                )}"}},"checkpoints":[{"sequence":1,"checkpoint":"AFTER_LAUNCH","observedAt":"2026-09-13T10:15:31Z","identity":{"outcome":"DRIFT_DETECTED","observed":{"capabilitySchemaVersion":1,"apiLevel":35,"buildFingerprint":"generic/sdk","bootIdentifier":"223e4567-e89b-12d3-a456-426614174000","commandSurfaces":["getprop"]},"detail":"Boot identifier drifted."},"environment":{"outcome":"NOT_EVALUATED","detail":"No environment contract was present."},"artifact":{"outcome":"MATCHED","installedApkSha256":"${"a".repeat(
+                    64,
+                )}","detail":"Artifact matched."},"outcome":"DRIFT_DETECTED","detail":"Drift was detected."}],"outcome":"DRIFT_DETECTED","explanation":"Sequential bounded observations detected drift."}
+                """,
+            )
+        val mutationFiles =
+            if (includeMutation) {
+                listOf(
+                    EvidenceFileInput(
+                        mutation,
+                        BundleRelativePath("environment/transaction-continuity.json"),
                         "application/json",
                         EvidenceFileRole.TEST_RESULT,
                     ),
@@ -562,7 +612,7 @@ class EvidenceReportGeneratorTest {
                             "application/json",
                             EvidenceFileRole.NETWORK,
                         ),
-                    ) + environmentFiles,
+                    ) + environmentFiles + mutationFiles,
                 ),
                 bundle,
                 signing = signing?.let { BundleSigningConfiguration(it.private, it.public) },

@@ -2,18 +2,18 @@
 
 **Artifact-bound, evidence-oriented verification for Android applications.**
 
-DroidProof is an early Kotlin/JVM prototype. Its current vertical slice first records bounded read-only emulator capability/image observations, verifies an explicitly supplied locale/orientation/animation contract against an already-selected emulator, installs an exact APK only after those preconditions match, executes and captures the scenario, rechecks image/boot and requested environment continuity before rollback, then publishes an integrity-bound and optionally Ed25519-authenticated evidence bundle.
+DroidProof is an early Kotlin/JVM prototype. Its current vertical slice first records bounded read-only emulator capability/image observations, verifies an explicitly supplied locale/orientation/animation contract against an already-selected emulator, installs an exact APK only after those preconditions match, executes deterministic transaction checkpoints around the scenario and capture, rechecks image/boot and requested environment continuity before rollback, then publishes an integrity-bound and optionally Ed25519-authenticated evidence bundle.
 
 The APIs and schemas are not yet a stable release.
 
 ## Current implementation
 
-- `droidproof-model` owns validated evidence identities, portable bundle paths, evidence descriptors, schema-v1/v2 legacy manifests, the schema-v3 execution manifest, strict environment contract/evaluation models, and canonical timeline events.
+- `droidproof-model` owns validated evidence identities, portable bundle paths, evidence descriptors, schema-v1/v2 legacy manifests, the schema-v3 execution manifest, strict environment contract/evaluation and transaction-mutation models, and canonical timeline events.
 - `droidproof-evidence` transactionally writes bundles, streams SHA-256 and byte-size inventory data, and verifies schemas v1, v2, and v3 with structured issues. It can optionally sign the exact completed manifest/timeline core with JDK 17 Ed25519 and separately reports integrity and authentication against a caller-supplied public key. Its synthetic sample remains unsigned and receives the authoritative Gradle project version.
 - `droidproof-device` provides bounded ADB process execution and explicit screenshot, allowlisted metadata, and opt-in PID-filtered logcat collection.
 - `droidproof-mock-server` is a small Android-independent JDK HTTP server. It binds only to `127.0.0.1`, uses an ephemeral host port, serves the narrow deterministic `POST /orders` response plan, performs bounded exact-byte request-contract evaluation, records safe exchange metadata, and exposes explicit start/inspect/stop lifecycle methods.
-- `droidproof-host` performs lease-scoped preflight, bounded read-only capability/image probing, verify-only or explicit apply-and-restore environment handling, exact APK byte binding, network setup, execution, continuity checking, cleanup, publication, and verification. Signing keys stay outside Android execution and evidence documents.
-- `droidproof-report` verifies a bundle before rendering a deterministic static HTML report. It distinguishes unsigned, signed-without-external-trust, authenticated, and authentication-failure states. Verified environment bundles show requested and observed locale, orientation, and animation scales. Integrity or explicitly requested authentication failures get only a limited diagnostic report.
+- `droidproof-host` performs lease-scoped preflight, bounded read-only capability/image probing, verify-only or explicit apply-and-restore environment handling, exact APK byte binding, deterministic mutation checkpoints, network setup, execution, continuity checking, cleanup, publication, and verification. Signing keys stay outside Android execution and evidence documents.
+- `droidproof-report` verifies a bundle before rendering a deterministic static HTML report. It distinguishes unsigned, signed-without-external-trust, authenticated, and authentication-failure states. Verified bundles show environment and bounded transaction-mutation observations. Integrity or explicitly requested authentication failures get only a limited diagnostic report.
 - `samples/smoke-app` preserves the v1/v2 greeting flow and adds a separate real HTTP order action. That action performs network I/O off the main thread, retries exactly once after HTTP 503, accepts the deterministic HTTP 201 JSON order ID, and displays `Order order-42 created`. Its single-task launch resets the demo UI between consecutive scenario runs.
 
 Build and test all JVM modules with JDK 17:
@@ -39,10 +39,13 @@ Scenario, emulator-environment, evidence, and authentication schema versions are
 - Environment-evaluation schema v1 records validated observations, per-field outcomes, an overall `MATCHED`, `MISMATCHED`, or `UNAVAILABLE` outcome, safe explanations, and the actual observation limitations.
 - Capability-observation schema v1 records bounded API level, build fingerprint, UUID-compatible boot identifier, and narrowly observed command surfaces. It is not image provenance and advertised help/surfaces do not prove future write permission.
 - Continuity schema v1 records initial/final identity observations and final requested-environment evaluation. `MISMATCHED` and `UNAVAILABLE` are infrastructure/precondition errors, not application behavioral failures.
+- Transaction-mutation-observation schema v1 records available identity, requested-environment, and bound-APK baselines plus deterministic checkpoints after binding, after launch, after each completed scenario step, before capture, and after capture. Component and aggregate outcomes are `MATCHED`, `DRIFT_DETECTED`, `UNAVAILABLE`, or `NOT_EVALUATED`.
 
-For an environment contract the live order is cooperative lease, emulator/user preflight, read-only capability probe, snapshot/apply/initial environment evaluation where requested, artifact/network/UI work, final identity and environment continuity evaluation, restoration and restoration verification, then network cleanup and publication. `VERIFY_ONLY` remains free of environment writes. The bounded overall budget includes these additional ADB observations.
+For an environment contract the live order is cooperative lease, emulator/user preflight, read-only capability probe, snapshot/apply/initial environment evaluation where requested, artifact binding and its checkpoint, network setup, launch and its checkpoint, ordered UI steps with a checkpoint after each completed step, a pre-capture checkpoint, capture, a post-capture checkpoint, network evaluation and cleanup, final environment continuity evaluation, restoration and restoration verification, then publication. `VERIFY_ONLY` remains free of environment writes. The bounded overall budget includes these additional Android Debug Bridge (ADB) observations.
 
-Capability and continuity evidence are inventoried at `environment/capabilities.json` and `environment/continuity.json` and timeline-linked. The offline report renders them only after complete bundle integrity verification and escapes all values. Image metadata is an observation, not image provenance; boot ID is a bounded continuity signal, not remote attestation. The cooperative lease cannot prevent Android Studio, people, or arbitrary ADB processes from changing an emulator, and sequential observations do not prove uninterrupted stability.
+Capability, final continuity, and live transaction-mutation evidence are inventoried at `environment/capabilities.json`, `environment/continuity.json`, and `environment/transaction-continuity.json` and timeline-linked. The offline report renders them only after complete bundle integrity verification and escapes all values. A drift or unavailable checkpoint stops later scenario actions but does not skip owned network cleanup, applicable environment restoration, or rollback verification. Image metadata is an observation, not image provenance; boot ID is a bounded continuity signal, not remote attestation. The cooperative lease cannot prevent Android Studio, people, or arbitrary ADB processes from changing an emulator.
+
+The exact proof boundary is sequential bounded observations of API level, build fingerprint, boot ID, requested environment fields when present, and target APK bytes once bound. A match does not prove stability between checkpoints. The feature is not continuous monitoring, exclusive emulator ownership, actor attribution, or detection of every external mutation.
 
 Recovery-journal schema v1 is separate from evidence schemas. It retains only the data needed to restore an interrupted `APPLY_AND_RESTORE` transaction.
 
@@ -147,11 +150,12 @@ The scenario explicitly repeats the non-secret literal `DroidProof42` in the `ty
 
 1. verifies `persist.sys.locale`, locked user-0 orientation, and the three global animation scales without writing settings;
 2. binds or installs the exact APK only after the environment matches;
-3. starts `droidproof-mock-server` on an ephemeral `127.0.0.1` host port and creates the serial-scoped reverse mapping;
-4. observes and verifies the two real `POST /orders` request contracts and ordered 503/201 response plan;
-5. asserts the final UI text `Order order-42 created` and evaluates the ordered server exchange sequence;
-6. removes only the owned reverse mapping and stops the owned server; and
-7. publishes and verifies the evidence bundle.
+3. compares emulator identity, requested environment fields, and target APK bytes at deterministic bounded checkpoints;
+4. starts `droidproof-mock-server` on an ephemeral `127.0.0.1` host port and creates the serial-scoped reverse mapping;
+5. observes and verifies the two real `POST /orders` request contracts and ordered 503/201 response plan;
+6. asserts the final UI text `Order order-42 created` and evaluates the ordered server exchange sequence;
+7. removes only the owned reverse mapping and stops the owned server; and
+8. publishes and verifies the evidence bundle.
 
 There is no fallback to LAN or uncontrolled networking if setup fails. Reverse removal and server shutdown are attempted after success, assertion failure, host failure, timeout, and cancellation. Cleanup errors do not replace the original failure.
 
@@ -167,8 +171,12 @@ bundle/
 │   ├── artifact-binding.json
 │   └── result.json
 ├── environment/
+│   ├── capabilities.json
 │   ├── contract.json
-│   └── evaluation.json
+│   ├── continuity.json
+│   ├── evaluation.json
+│   ├── transaction-continuity.json
+│   └── transaction.json
 ├── ui/steps/
 │   ├── 001-input-before.xml
 │   ├── 002-tap-before.xml
@@ -221,7 +229,7 @@ Generate a report from a preserved bundle, using paths outside that bundle:
   -Pdroidproof.reportPath=/absolute/path/to/report.html
 ```
 
-The default output is `droidproof-report/build/reports/droidproof/evidence-report.html`. The report has inline CSS, no JavaScript, and no external resources. Its “Emulator environment” section reads only verified, inventoried `environment/evaluation.json` and shows requested/observed locale, orientation, scales, and outcome. Network bodies and raw device output are not injected into HTML. If any registered evidence is missing or tampered, verification fails and the report omits all unverified environment, artifact, scenario, timeline, network, and preview content.
+The default output is `droidproof-report/build/reports/droidproof/evidence-report.html`. The report has inline CSS, no JavaScript, and no external resources. Its environment and transaction-mutation sections read only verified, inventoried evidence. The transaction section states when sequential bounded observations detected drift and explicitly excludes continuous monitoring, exclusive ownership, and actor attribution. Network bodies and raw device output are not injected into HTML. If any registered evidence is missing or tampered, verification fails and the report omits all unverified environment, mutation, artifact, scenario, timeline, network, and preview content.
 
 Without an external key, the report says either that the bundle is unsigned or that a signature is present but authenticity was not established. Verify a signed bundle against the externally obtained public key and render its authenticated status with:
 
@@ -244,6 +252,7 @@ The HTML is a derived view and is not itself evidence. See [ADR 0007](docs/adr/0
 - DroidProof proves what its controlled mock server observed. It does not prove that no other network traffic occurred. It is not a packet capture or TLS interception.
 - Host, Android, and server wall clocks are not treated as a shared causal clock. The controlled server's sequence establishes order only among its own exchanges.
 - Environment verification is limited to `persist.sys.locale`, locked user-0 `user_rotation` with `accelerometer_rotation=0`, and three global animation-scale settings. Auto-rotation, missing/malformed settings, unsupported Android output, and non-finite or negative scales are unavailable rather than guessed. These sequential point observations do not prove stability, effective application locale, physical posture, or full emulator determinism.
+- Live transaction mutation detection evaluates only the recorded checkpoints and narrow fields. `DRIFT_DETECTED` does not identify a cause or actor; `MATCHED` does not prove uninterrupted stability or the absence of other changes.
 - DroidProof mutates locale, rotation, and animation scales only in explicit `APPLY_AND_RESTORE` mode, then attempts bounded exact restoration. It does not provision or manage emulator lifecycle. Random seed and controlled clock remain explicitly unavailable.
 - Evidence hashes establish consistency with the manifest, not authenticity. For a signed bundle, successful integrity verification plus Ed25519 verification against an externally trusted public key authenticates the exact manifest/timeline core and transitively the manifest inventory. An unsigned bundle, or a signed bundle checked without an external trust key, makes no producer-authentication claim.
 - Bundle authentication establishes limited provenance from possession of the corresponding private key. It is not non-repudiation, trusted timestamping, certificate validation, key ownership discovery, revocation, transparency logging, remote attestation, or proof that the recorded observations are true. Compromised signing keys and external trusted-key distribution remain operator concerns.
@@ -263,6 +272,7 @@ See [ADR 0008](docs/adr/0008-deterministic-network-evidence.md), [ADR 0009](docs
 | Cooperative emulator execution lease | Implemented: non-blocking serial-scoped, same-host DroidProof-process exclusion through cleanup and environment rollback |
 | Interrupted environment recovery | Implemented: strict external serial-digest journal, normal-run blocking, and explicit identity-gated recovery |
 | Environment evidence and verified report section | Evaluation and integrity-bound transaction documents with timeline binding |
+| Bounded live transaction mutation observation | Implemented at deterministic identity, requested-environment, and bound-APK checkpoints with fail-closed action stopping |
 | Ordered View-based UI text/tap/assert | Implemented narrow resource-ID/exact-text slice |
 | Deterministic loopback mock server and ADB reverse | Implemented for `POST /orders` ordered responses |
 | Exact HTTP request-contract verification | Implemented for one v4 JSON body/media type on `POST /orders` |
@@ -276,7 +286,7 @@ See [ADR 0008](docs/adr/0008-deterministic-network-evidence.md), [ADR 0009](docs
 | Published Gradle plugin, general CLI, or general-purpose scenario DSL | Not implemented |
 | PKI, certificate chains, revocation, timestamping, transparency, KMS/HSM, or remote attestation | Not implemented |
 
-The lease is not exclusive ownership of the emulator: Android Studio, people, arbitrary ADB, non-cooperating processes, other hosts, crashes, and SIGKILL remain outside its guarantee. The next recommended milestone is bounded detection and operator reporting of external mutation during a live transaction; it is neither provisioning nor remote attestation.
+The lease is not exclusive ownership of the emulator: Android Studio, people, arbitrary ADB, non-cooperating processes, other hosts, crashes, and SIGKILL remain outside its guarantee. The next recommended milestone is bounded APK signing-certificate identity evidence, closing the current producer-identity gap without changing the exact-byte binding or claiming remote attestation.
 
 ## Architecture decisions
 
@@ -295,3 +305,4 @@ The lease is not exclusive ownership of the emulator: Android Studio, people, ar
 - [ADR 0013](docs/adr/0013-cooperative-emulator-execution-lease.md): cooperative same-host serial execution lease
 - [ADR 0014](docs/adr/0014-emulator-capability-and-continuity-observation.md): emulator capability and continuity observation
 - [ADR 0015](docs/adr/0015-crash-resilient-environment-recovery-journal.md): crash-resilient environment recovery journal
+- [ADR 0016](docs/adr/0016-bounded-live-transaction-mutation-observation.md): bounded live-transaction mutation observation
