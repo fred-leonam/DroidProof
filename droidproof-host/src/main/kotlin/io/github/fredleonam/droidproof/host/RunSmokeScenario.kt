@@ -11,15 +11,20 @@ import io.github.fredleonam.droidproof.model.EnvironmentExecutionMode
 import java.nio.file.Path
 
 fun main(args: Array<String>) {
-    require(args.size == 12) { "Expected smoke-scenario task configuration arguments." }
+    require(args.size == 17) { "Expected smoke-scenario task configuration arguments." }
     require(args[1].isNotBlank()) { "Set -Pdroidproof.apkPath to one local APK." }
     require(args[2].isNotBlank()) { "Set -Pdroidproof.scenarioPath to one local scenario JSON document." }
-    require(args[3].isNotBlank()) { "Set -Pdroidproof.deviceSerial to an authorized test emulator serial." }
     val replaceExisting =
         requireNotNull(args[5].toBooleanStrictOrNull()) {
             "droidproof.replaceExisting must be true or false."
         }
     val adbPath = AdbPathResolver.resolve(args[4].takeIf(String::isNotBlank))
+    val lifecycle = EmulatorLifecycleConfiguration(
+        deviceSerial = args[3].takeIf(String::isNotBlank),
+        avdName = args[11].takeIf(String::isNotBlank),
+        emulatorPath = Path.of(args[12]), adbPath = adbPath,
+        port = args[13].toInt(), startupTimeoutMillis = args[14].toLong(), shutdownTimeoutMillis = args[15].toLong(),
+    )
     val privateKeyPath = args[6].takeIf(String::isNotBlank)
     val publicKeyPath = args[7].takeIf(String::isNotBlank)
     require((privateKeyPath == null) == (publicKeyPath == null)) {
@@ -34,8 +39,7 @@ fun main(args: Array<String>) {
                 Ed25519KeyLoader.loadPublicKey(Path.of(requireNotNull(publicKeyPath))),
             )
         }
-    val result =
-        SmokeCoordinator(
+    val coordinator = SmokeCoordinator(
             device = SmokeAdbClient(adbPath),
             capture = DeviceEvidenceCapture(DeviceCollector(AdbClient(adbPath))::capture),
             publisher =
@@ -43,11 +47,19 @@ fun main(args: Array<String>) {
                     EvidenceBundleWriter().write(request, destination, signing = signing)
                 },
             recoveryJournalStore = FileEmulatorRecoveryJournalStore(Path.of(args[10])),
-        ).run(
+        )
+    var session: ManagedEmulatorSession? = null
+    var primary: Throwable? = null
+    val result = try {
+        session = if (lifecycle.avdName != null) LegacyEmulatorLifecycleManager().start(lifecycle) else object : ManagedEmulatorSession {
+            override val serial = requireNotNull(lifecycle.deviceSerial)
+            override fun close() = Unit
+        }
+        coordinator.run(
             SmokeRunRequest(
                 apkPath = Path.of(args[1]),
                 scenarioPath = Path.of(args[2]),
-                deviceSerial = args[3],
+                deviceSerial = requireNotNull(session).serial,
                 outputRoot = Path.of(args[0]),
                 environmentPath = args[8].takeIf(String::isNotBlank)?.let(Path::of),
                 environmentMode =
@@ -59,9 +71,17 @@ fun main(args: Array<String>) {
                         },
                     ) { "droidproof.environmentMode must be VERIFY_ONLY or APPLY_AND_RESTORE." },
                 replaceExisting = replaceExisting,
-                droidProofVersion = DroidProofVersion(args[11]),
+                droidProofVersion = DroidProofVersion(args[16]),
             ),
         )
+    } catch (e: Throwable) {
+        primary = e
+        throw e
+    } finally {
+        try { session?.close() } catch (cleanup: Throwable) {
+            if (primary != null) primary.addSuppressed(cleanup) else throw cleanup
+        }
+    }
     val location = result.output ?: result.diagnostic
     println("DroidProof smoke result: ${result.document?.status ?: "ERROR"} at $location")
     check(result.isSuccessful) {

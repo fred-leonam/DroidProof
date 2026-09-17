@@ -121,6 +121,20 @@ export DROIDPROOF_EMULATOR_SERIAL='<confirmed-authorized-emulator-serial>'
 
 The command above produces an unsigned bundle. To create a signed bundle, first generate a disposable Ed25519 PKCS#8 private key and X.509/SPKI public key outside the repository. OpenSSL's PEM output is accepted directly:
 
+To let DroidProof own the lifecycle of one already-created AVD, omit `deviceSerial` and provide an exact AVD name. The default emulator executable is `emulator`; override it when needed. DroidProof derives `emulatorPort` into the exact serial, waits for ADB/device and Android boot readiness, runs the same transaction, then stops only the process it started:
+
+```bash
+./gradlew :droidproof-host:runSmokeScenario \
+  -Pdroidproof.apkPath="$PWD/samples/smoke-app/build/outputs/apk/release/DroidProofSmokeApp-release.apk" \
+  -Pdroidproof.scenarioPath="$PWD/samples/smoke-app/scenarios/network-request-passing.json" \
+  -Pdroidproof.avdName='Existing_API_35' \
+  -Pdroidproof.emulatorPort=5556 \
+  -Pdroidproof.adbPath=/absolute/path/to/Android/Sdk/platform-tools/adb \
+  -Pdroidproof.replaceExisting=true
+```
+
+`deviceSerial` and `avdName` are mutually exclusive. External emulators are never stopped. Lifecycle startup/shutdown are bounded; provisioning, AVD creation, wiping, image provenance, and attestation remain out of scope.
+
 ```bash
 DROIDPROOF_KEY_DIR="$(mktemp -d /tmp/droidproof-ed25519.XXXXXX)"
 chmod 700 "$DROIDPROOF_KEY_DIR"
@@ -277,7 +291,7 @@ See [ADR 0008](docs/adr/0008-deterministic-network-evidence.md), [ADR 0009](docs
 | Deterministic loopback mock server and ADB reverse | Implemented for `POST /orders` ordered responses |
 | Exact HTTP request-contract verification | Implemented for one v4 JSON body/media type on `POST /orders` |
 | Real network exchange evidence and report section | Implemented with request contract outcome, issues, size, and SHA-256 |
-| Emulator lifecycle management | Not implemented |
+| Emulator lifecycle management | Implemented for bounded start/readiness/stop of one explicitly selected pre-existing AVD; externally supplied emulators remain externally owned |
 | Automatic environment mutation and restoration | Implemented only as explicit transactional application on the selected emulator; no lifecycle/provisioning |
 | Full deterministic emulator provisioning | Not implemented |
 | Arbitrary traffic interception or TLS MITM | Not implemented |
