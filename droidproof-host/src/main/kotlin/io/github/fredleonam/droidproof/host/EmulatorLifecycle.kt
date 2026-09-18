@@ -14,6 +14,8 @@ data class EmulatorLifecycleConfiguration(
     val port: Int = 5554,
     val startupTimeoutMillis: Long = 120_000,
     val shutdownTimeoutMillis: Long = 30_000,
+    /** Non-null only for an AVD created in DroidProof's owned provisioning root. */
+    val ownedAvdDirectory: Path? = null,
 ) {
     init {
         require((deviceSerial != null) xor (avdName != null)) { "Set exactly one of droidproof.deviceSerial or droidproof.avdName." }
@@ -39,7 +41,8 @@ class EmulatorLifecycleException(message: String, cause: Throwable? = null) : Ru
 /** Legacy SDK emulator backend. The explicit port makes the serial association deterministic. */
 class LegacyEmulatorLifecycleManager(
     private val runner: CommandRunner = ProcessCommandRunner(),
-    private val processFactory: (List<String>) -> Process = { ProcessBuilder(it).start() },
+    // Emulator is long-lived; inherit streams so no unread ProcessBuilder pipe can block it.
+    private val processFactory: (List<String>) -> Process = { ProcessBuilder(it).inheritIO().start() },
     private val sleeper: (Long) -> Unit = { Thread.sleep(it) },
 ) : EmulatorLifecycleManager {
     override fun start(configuration: EmulatorLifecycleConfiguration): ManagedEmulatorSession {
@@ -48,8 +51,13 @@ class LegacyEmulatorLifecycleManager(
             runner.execute(
                 CommandRequest(listOf(configuration.emulatorPath.toString(), "-list-avds"), configuration.startupTimeoutMillis),
             )
-        if (listed.failure != null || listed.exitCode != 0) throw EmulatorLifecycleException("Could not list existing AVDs.")
-        if (listed.stdout.lineSequence().map(String::trim).none {
+        if (configuration.ownedAvdDirectory == null && (listed.failure != null || listed.exitCode != 0)) {
+            throw EmulatorLifecycleException(
+                "Could not list existing AVDs.",
+            )
+        }
+        if (configuration.ownedAvdDirectory == null &&
+            listed.stdout.lineSequence().map(String::trim).none {
                 it == avd
             }
         ) {
@@ -58,7 +66,17 @@ class LegacyEmulatorLifecycleManager(
         val serial = "emulator-${configuration.port}"
         val process =
             try {
-                processFactory(listOf(configuration.emulatorPath.toString(), "-avd", avd, "-port", configuration.port.toString()))
+                processFactory(
+                    listOf(
+                        configuration.emulatorPath.toString(),
+                        "-avd",
+                        avd,
+                        "-wipe-data",
+                        "-no-snapshot",
+                        "-port",
+                        configuration.port.toString(),
+                    ),
+                )
             } catch (
                 e: Exception,
             ) {
@@ -86,7 +104,15 @@ class LegacyEmulatorLifecycleManager(
                                 remaining(deadline),
                             ),
                         )
-                    if (boot.stdout.trim() == "1") return Session(serial, process, configuration, runner, sleeper)
+                    if (boot.failure == null && boot.exitCode == 0 && boot.stdout.trim() == "1") {
+                        return Session(
+                            serial,
+                            process,
+                            configuration,
+                            runner,
+                            sleeper,
+                        )
+                    }
                 }
                 sleeper(100)
             }

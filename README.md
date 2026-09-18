@@ -2,7 +2,7 @@
 
 **Artifact-bound, evidence-oriented verification for Android applications.**
 
-DroidProof is an early Kotlin/JVM prototype. Its current vertical slice first records bounded read-only emulator capability/image observations, verifies an explicitly supplied locale/orientation/animation contract against an already-selected emulator, installs an exact APK only after those preconditions match, executes deterministic transaction checkpoints around the scenario and capture, rechecks image/boot and requested environment continuity before rollback, then publishes an integrity-bound and optionally Ed25519-authenticated evidence bundle.
+DroidProof is an early Kotlin/JVM prototype. Its current vertical slice can use an external emulator, start an existing AVD, or provision a clean owned AVD from an exact SDK/image contract; it then verifies preconditions, installs an exact APK, executes transaction checkpoints, and publishes integrity-bound evidence.
 
 The APIs and schemas are not yet a stable release.
 
@@ -12,7 +12,7 @@ The APIs and schemas are not yet a stable release.
 - `droidproof-evidence` transactionally writes bundles, streams SHA-256 and byte-size inventory data, and verifies schemas v1, v2, and v3 with structured issues. It can optionally sign the exact completed manifest/timeline core with JDK 17 Ed25519 and separately reports integrity and authentication against a caller-supplied public key. Its synthetic sample remains unsigned and receives the authoritative Gradle project version.
 - `droidproof-device` provides bounded ADB process execution and explicit screenshot, allowlisted metadata, and opt-in PID-filtered logcat collection.
 - `droidproof-mock-server` is a small Android-independent JDK HTTP server. It binds only to `127.0.0.1`, uses an ephemeral host port, serves the narrow deterministic `POST /orders` response plan, performs bounded exact-byte request-contract evaluation, records safe exchange metadata, and exposes explicit start/inspect/stop lifecycle methods.
-- `droidproof-host` performs lease-scoped preflight, bounded read-only capability/image probing, verify-only or explicit apply-and-restore environment handling, exact APK byte binding, deterministic mutation checkpoints, network setup, execution, continuity checking, cleanup, publication, and verification. Signing keys stay outside Android execution and evidence documents.
+- `droidproof-host` performs lease-scoped preflight, owned deterministic legacy-SDK AVD provisioning, lifecycle handling, environment handling, exact APK binding, execution, cleanup, publication, and verification.
 - `droidproof-report` verifies a bundle before rendering a deterministic static HTML report. It distinguishes unsigned, signed-without-external-trust, authenticated, and authentication-failure states. Verified bundles show environment and bounded transaction-mutation observations. Integrity or explicitly requested authentication failures get only a limited diagnostic report.
 - `samples/smoke-app` preserves the v1/v2 greeting flow and adds a separate real HTTP order action. That action performs network I/O off the main thread, retries exactly once after HTTP 503, accepts the deterministic HTTP 201 JSON order ID, and displays `Order order-42 created`. Its single-task launch resets the demo UI between consecutive scenario runs.
 
@@ -122,6 +122,30 @@ export DROIDPROOF_EMULATOR_SERIAL='<confirmed-authorized-emulator-serial>'
 The command above produces an unsigned bundle. To create a signed bundle, first generate a disposable Ed25519 PKCS#8 private key and X.509/SPKI public key outside the repository. OpenSSL's PEM output is accepted directly:
 
 To let DroidProof own the lifecycle of one already-created AVD, omit `deviceSerial` and provide an exact AVD name. The default emulator executable is `emulator`; override it when needed. DroidProof derives `emulatorPort` into the exact serial, waits for ADB/device and Android boot readiness, runs the same transaction, then stops only the process it started:
+
+## Owned deterministic provisioning
+
+Provisioning is opt-in and mutually exclusive with `deviceSerial` and `avdName`. It verifies installed SDK metadata and never downloads, updates packages, accepts licenses, or touches the normal Android Studio AVD directory. The contract is strict UTF-8 JSON (schema version 1):
+
+```json
+{"schemaVersion":1,"systemImagePackage":"system-images;android-35;google_apis;x86_64","systemImageRevision":"1","apiLevel":35,"abi":"x86_64","emulatorRevision":"35.1.4","platformToolsRevision":"35.0.2","commandLineToolsRevision":"12.0","deviceProfile":"pixel_5","buildFingerprint":"optional/exact/fingerprint"}
+```
+
+Run it with an explicit SDK root, explicitly versioned `avdmanager`, and an owned state root:
+
+```bash
+./gradlew :droidproof-host:runSmokeScenario \
+  -Pdroidproof.apkPath="$PWD/samples/smoke-app/build/outputs/apk/release/DroidProofSmokeApp-release.apk" \
+  -Pdroidproof.scenarioPath="$PWD/samples/smoke-app/scenarios/network-request-passing.json" \
+  -Pdroidproof.provisioningPath=/absolute/path/to/provisioning.json \
+  -Pdroidproof.sdkRoot=/absolute/path/to/Android/Sdk \
+  -Pdroidproof.avdManagerPath=/absolute/path/to/Android/Sdk/cmdline-tools/12.0/bin/avdmanager \
+  -Pdroidproof.emulatorPath=/absolute/path/to/Android/Sdk/emulator/emulator \
+  -Pdroidproof.adbPath=/absolute/path/to/Android/Sdk/platform-tools/adb \
+  -Pdroidproof.provisioningStateRoot=/absolute/path/to/droidproof-owned-avds
+```
+
+The owned AVD starts with `-wipe-data` and `-no-snapshot`, derives `emulator-<port>`, is verified for API/ABI and optional fingerprint, and is stopped before its marked directory is removed. This is baseline selection, not remote attestation: host/ADB actors, scheduling, wall clock, hypervisor behavior, historical SDK repository availability, and bit-for-bit execution remain outside the proof boundary.
 
 ```bash
 ./gradlew :droidproof-host:runSmokeScenario \
