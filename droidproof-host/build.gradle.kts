@@ -37,7 +37,7 @@ tasks.test {
 
 tasks.register<JavaExec>("runSmokeScenario") {
     group = "droidproof"
-    description = "Runs one artifact-bound Android smoke scenario on an external serial or owned existing AVD."
+    description = "Runs one artifact-bound Android smoke scenario on an external serial, existing AVD, or provisioned owned AVD."
     classpath = sourceSets.main.get().runtimeClasspath
     mainClass.set("io.github.fredleonam.droidproof.host.RunSmokeScenarioKt")
     outputs.upToDateWhen { false }
@@ -59,6 +59,10 @@ tasks.register<JavaExec>("runSmokeScenario") {
         "emulatorPort" to "5554",
         "lifecycleStartupTimeoutMillis" to "120000",
         "lifecycleShutdownTimeoutMillis" to "30000",
+        "provisioningPath" to "",
+        "sdkRoot" to "",
+        "provisioningStateRoot" to layout.projectDirectory.dir(".droidproof-provisioning").asFile.absolutePath,
+        "avdManagerPath" to "avdmanager",
     )) {
         args(providers.gradleProperty("droidproof.$name").orElse(default).get())
     }

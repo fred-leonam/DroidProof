@@ -11,7 +11,7 @@ import io.github.fredleonam.droidproof.model.EnvironmentExecutionMode
 import java.nio.file.Path
 
 fun main(args: Array<String>) {
-    require(args.size == 17) { "Expected smoke-scenario task configuration arguments." }
+    require(args.size == 21) { "Expected smoke-scenario task configuration arguments." }
     require(args[1].isNotBlank()) { "Set -Pdroidproof.apkPath to one local APK." }
     require(args[2].isNotBlank()) { "Set -Pdroidproof.scenarioPath to one local scenario JSON document." }
     val replaceExisting =
@@ -19,16 +19,26 @@ fun main(args: Array<String>) {
             "droidproof.replaceExisting must be true or false."
         }
     val adbPath = AdbPathResolver.resolve(args[4].takeIf(String::isNotBlank))
-    val lifecycle =
-        EmulatorLifecycleConfiguration(
-            deviceSerial = args[3].takeIf(String::isNotBlank),
-            avdName = args[11].takeIf(String::isNotBlank),
-            emulatorPath = Path.of(args[12]),
-            adbPath = adbPath,
-            port = args[13].toInt(),
-            startupTimeoutMillis = args[14].toLong(),
-            shutdownTimeoutMillis = args[15].toLong(),
-        )
+    val explicitSerial = args[3].takeIf(String::isNotBlank)
+    val existingAvd = args[11].takeIf(String::isNotBlank)
+    val provisioningPath = args[17].takeIf(String::isNotBlank)?.let(Path::of)
+    require(listOf(explicitSerial, existingAvd, provisioningPath).count { it != null } == 1) {
+        "Set exactly one of droidproof.deviceSerial, droidproof.avdName, or droidproof.provisioningPath."
+    }
+
+    fun lifecycle(
+        avd: String,
+        owned: Path? = null,
+    ) = EmulatorLifecycleConfiguration(
+        deviceSerial = null,
+        avdName = avd,
+        emulatorPath = Path.of(args[12]),
+        adbPath = adbPath,
+        port = args[13].toInt(),
+        startupTimeoutMillis = args[14].toLong(),
+        shutdownTimeoutMillis = args[15].toLong(),
+        ownedAvdDirectory = owned,
+    )
     val privateKeyPath = args[6].takeIf(String::isNotBlank)
     val publicKeyPath = args[7].takeIf(String::isNotBlank)
     require((privateKeyPath == null) == (publicKeyPath == null)) {
@@ -58,14 +68,25 @@ fun main(args: Array<String>) {
     val result =
         try {
             session =
-                if (lifecycle.avdName != null) {
-                    LegacyEmulatorLifecycleManager().start(lifecycle)
-                } else {
-                    object : ManagedEmulatorSession {
-                        override val serial = requireNotNull(lifecycle.deviceSerial)
+                when {
+                    provisioningPath != null ->
+                        LegacySdkEmulatorProvisioner().provision(
+                            EmulatorProvisioningConfiguration(
+                                EmulatorProvisioningContractLoader.load(provisioningPath),
+                                args[18].also {
+                                    require(it.isNotBlank()) { "droidproof.sdkRoot is required for provisioning." }
+                                }.let { Path.of(it).toAbsolutePath() },
+                                Path.of(args[19]).toAbsolutePath(), Path.of(args[20]), Path.of(args[12]), adbPath,
+                                args[13].toInt(), args[14].toLong(),
+                            ),
+                        )
+                    existingAvd != null -> LegacyEmulatorLifecycleManager().start(lifecycle(existingAvd))
+                    else ->
+                        object : ManagedEmulatorSession {
+                            override val serial = requireNotNull(explicitSerial)
 
-                        override fun close() = Unit
-                    }
+                            override fun close() = Unit
+                        }
                 }
             coordinator.run(
                 SmokeRunRequest(
