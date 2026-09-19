@@ -36,10 +36,11 @@ class EmulatorLifecycleTest {
                         assertEquals(listOf("emulator", "-list-avds"), request.arguments)
                         CommandResult(stdout = "other\n", exitCode = 0)
                     },
-                processFactory = {
-                    created = true
-                    error("must not create")
-                },
+                launcher =
+                    EmulatorProcessLauncher {
+                        created = true
+                        error("must not create")
+                    },
             )
         assertFailsWith<EmulatorLifecycleException> { manager.start(config(avd = "pixel")) }
         assertEquals(false, created)

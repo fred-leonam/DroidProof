@@ -19,11 +19,14 @@ data class CommandRequest(
     val stdoutLimitBytes: Long = 65536,
     val stderrLimitBytes: Long = 65536,
     val stdoutFile: Path? = null,
+    /** Additive process environment overrides; the inherited environment is otherwise preserved. */
+    val environment: Map<String, String> = emptyMap(),
 ) {
     init {
         require(arguments.isNotEmpty() && arguments.none { '\u0000' in it })
         require(timeoutMillis in 1..3600000)
         require(stdoutLimitBytes in 1..Int.MAX_VALUE.toLong() && stderrLimitBytes in 1..Int.MAX_VALUE.toLong())
+        require(environment.all { (key, value) -> key.matches(Regex("[A-Za-z_][A-Za-z0-9_]*")) && '\u0000' !in value })
     }
 }
 
@@ -46,7 +49,9 @@ class ProcessCommandRunner internal constructor(private val onStarted: (Process)
         if (Thread.currentThread().isInterrupted) return CommandResult(failure = CommandFailure.INTERRUPTED)
         val process =
             try {
-                ProcessBuilder(request.arguments).redirectErrorStream(false).start()
+                ProcessBuilder(request.arguments).redirectErrorStream(false).apply {
+                    environment().putAll(request.environment)
+                }.start()
             } catch (_: IOException) {
                 return CommandResult(failure = CommandFailure.LAUNCH)
             } catch (_: SecurityException) {
