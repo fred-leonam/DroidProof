@@ -6,6 +6,12 @@ import io.github.fredleonam.droidproof.device.ProcessCommandRunner
 import java.nio.file.Path
 import java.util.concurrent.TimeUnit
 
+data class EmulatorLaunchRequest(val arguments: List<String>, val environment: Map<String, String>)
+
+fun interface EmulatorProcessLauncher {
+    fun launch(request: EmulatorLaunchRequest): Process
+}
+
 data class EmulatorLifecycleConfiguration(
     val deviceSerial: String?,
     val avdName: String?,
@@ -16,6 +22,7 @@ data class EmulatorLifecycleConfiguration(
     val shutdownTimeoutMillis: Long = 30_000,
     /** Non-null only for an AVD created in DroidProof's owned provisioning root. */
     val ownedAvdDirectory: Path? = null,
+    val environment: Map<String, String> = emptyMap(),
 ) {
     init {
         require((deviceSerial != null) xor (avdName != null)) { "Set exactly one of droidproof.deviceSerial or droidproof.avdName." }
@@ -42,14 +49,28 @@ class EmulatorLifecycleException(message: String, cause: Throwable? = null) : Ru
 class LegacyEmulatorLifecycleManager(
     private val runner: CommandRunner = ProcessCommandRunner(),
     // Emulator is long-lived; inherit streams so no unread ProcessBuilder pipe can block it.
-    private val processFactory: (List<String>) -> Process = { ProcessBuilder(it).inheritIO().start() },
+    private val launcher: EmulatorProcessLauncher =
+        EmulatorProcessLauncher { request ->
+            ProcessBuilder(request.arguments).inheritIO().apply { environment().putAll(request.environment) }.start()
+        },
     private val sleeper: (Long) -> Unit = { Thread.sleep(it) },
 ) : EmulatorLifecycleManager {
     override fun start(configuration: EmulatorLifecycleConfiguration): ManagedEmulatorSession {
-        val avd = configuration.avdName ?: error("External emulator mode does not start a process.")
+        configuration.deviceSerial?.let { serial ->
+            return object : ManagedEmulatorSession {
+                override val serial = serial
+
+                override fun close() = Unit
+            }
+        }
+        val avd = requireNotNull(configuration.avdName)
         val listed =
             runner.execute(
-                CommandRequest(listOf(configuration.emulatorPath.toString(), "-list-avds"), configuration.startupTimeoutMillis),
+                CommandRequest(
+                    listOf(configuration.emulatorPath.toString(), "-list-avds"),
+                    configuration.startupTimeoutMillis,
+                    environment = configuration.environment,
+                ),
             )
         if (configuration.ownedAvdDirectory == null && (listed.failure != null || listed.exitCode != 0)) {
             throw EmulatorLifecycleException(
@@ -64,17 +85,31 @@ class LegacyEmulatorLifecycleManager(
             throw EmulatorLifecycleException("Requested AVD '$avd' does not exist.")
         }
         val serial = "emulator-${configuration.port}"
+        val before =
+            runner.execute(
+                CommandRequest(
+                    listOf(configuration.adbPath.toString(), "devices"),
+                    configuration.startupTimeoutMillis,
+                    environment = configuration.environment,
+                ),
+            )
+        if (before.stdout.lineSequence().any { it.startsWith("$serial\t") }) {
+            throw EmulatorLifecycleException("Target emulator serial is already present before launch.")
+        }
         val process =
             try {
-                processFactory(
-                    listOf(
-                        configuration.emulatorPath.toString(),
-                        "-avd",
-                        avd,
-                        "-wipe-data",
-                        "-no-snapshot",
-                        "-port",
-                        configuration.port.toString(),
+                launcher.launch(
+                    EmulatorLaunchRequest(
+                        listOf(
+                            configuration.emulatorPath.toString(),
+                            "-avd",
+                            avd,
+                            "-wipe-data",
+                            "-no-snapshot",
+                            "-port",
+                            configuration.port.toString(),
+                        ),
+                        configuration.environment,
                     ),
                 )
             } catch (
@@ -87,7 +122,14 @@ class LegacyEmulatorLifecycleManager(
             while (System.nanoTime() < deadline) {
                 if (Thread.currentThread().isInterrupted) throw InterruptedException("Lifecycle startup interrupted.")
                 if (!process.isAlive) throw EmulatorLifecycleException("Emulator process exited during startup.")
-                val devices = runner.execute(CommandRequest(listOf(configuration.adbPath.toString(), "devices"), remaining(deadline)))
+                val devices =
+                    runner.execute(
+                        CommandRequest(
+                            listOf(configuration.adbPath.toString(), "devices"),
+                            remaining(deadline),
+                            environment = configuration.environment,
+                        ),
+                    )
                 val state = devices.stdout.lineSequence().firstOrNull { it.startsWith("$serial\t") }?.substringAfter('\t')?.trim()
                 if (state == "device") {
                     val boot =
@@ -102,6 +144,7 @@ class LegacyEmulatorLifecycleManager(
                                     "sys.boot_completed",
                                 ),
                                 remaining(deadline),
+                                environment = configuration.environment,
                             ),
                         )
                     if (boot.failure == null && boot.exitCode == 0 && boot.stdout.trim() == "1") {
@@ -145,6 +188,7 @@ class LegacyEmulatorLifecycleManager(
                     CommandRequest(
                         listOf(configuration.adbPath.toString(), "-s", serial, "emu", "kill"),
                         configuration.shutdownTimeoutMillis,
+                        environment = configuration.environment,
                     ),
                 )
             val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(configuration.shutdownTimeoutMillis)

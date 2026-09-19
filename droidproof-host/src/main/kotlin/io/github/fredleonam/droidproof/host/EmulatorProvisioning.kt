@@ -20,6 +20,7 @@ import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.BasicFileAttributes
+import java.util.concurrent.atomic.AtomicBoolean
 
 /** Portable identity of the SDK inputs, deliberately excluding host paths. */
 @Serializable
@@ -37,7 +38,7 @@ data class EmulatorProvisioningContractV1(
 ) {
     init {
         require(schemaVersion == 1)
-        require(PACKAGE.matches(systemImagePackage) && REVISION.matches(systemImageRevision))
+        require(PACKAGE.matches(systemImagePackage) && IMAGE_REVISION.matches(systemImageRevision))
         require(apiLevel in 1..999 && ABI.matches(abi) && REVISION.matches(emulatorRevision))
         require(platformToolsRevision == null || REVISION.matches(platformToolsRevision))
         require(REVISION.matches(commandLineToolsRevision) && PROFILE.matches(deviceProfile))
@@ -45,9 +46,12 @@ data class EmulatorProvisioningContractV1(
         require(systemImagePackage.contains(";android-$apiLevel;") && systemImagePackage.endsWith(";$abi"))
     }
 
-    private companion object {
+    companion object {
         val PACKAGE = Regex("[A-Za-z0-9._-]+(;[A-Za-z0-9._-]+)+")
         val REVISION = Regex("[0-9]+(\\.[0-9]+){1,5}")
+
+        // System-image source.properties commonly uses a single component (for example, "1").
+        val IMAGE_REVISION = Regex("[0-9]+(\\.[0-9]+){0,5}")
         val ABI = Regex("[A-Za-z0-9._-]{1,64}")
         val PROFILE = Regex("[A-Za-z0-9._ -]{1,128}")
     }
@@ -130,7 +134,7 @@ class LegacySdkEmulatorProvisioner(
             "command-line-tools",
         )
         val image = configuration.sdkRoot.resolve(contract.systemImagePackage.replace(';', '/')).resolve("source.properties")
-        verify(image, contract.systemImageRevision, "system image")
+        verify(image, contract.systemImageRevision, "system image", contract.systemImagePackage)
         val root = configuration.stateRoot.toAbsolutePath().normalize()
         Files.createDirectories(root)
         val key = configuration.accepted.sha256.value.take(24)
@@ -146,10 +150,13 @@ class LegacySdkEmulatorProvisioner(
             )
         }
         Files.createDirectory(avd)
+        val avdHome = avd.resolve("avd-home")
+        Files.createDirectory(avdHome)
         val marker = avd.resolve(".droidproof-owned.json")
         Files.writeString(
             marker,
-            "{\"schemaVersion\":1,\"contractSha256\":\"${configuration.accepted.sha256.value}\",\"avdName\":\"$avdName\"}",
+            "{\"schemaVersion\":1,\"contractSha256\":\"${configuration.accepted.sha256.value}\"," +
+                "\"avdName\":\"$avdName\",\"ownedDirectory\":\"$key\"}",
             StandardOpenOption.CREATE_NEW,
         )
         try {
@@ -162,6 +169,7 @@ class LegacySdkEmulatorProvisioner(
                             "--path", avd.toString(), "--force",
                         ),
                         configuration.timeoutMillis,
+                        environment = mapOf("ANDROID_AVD_HOME" to avdHome.toString()),
                     ),
                 )
             if (create.failure != null || create.exitCode != 0) {
@@ -188,12 +196,26 @@ class LegacySdkEmulatorProvisioner(
                         configuration.timeoutMillis,
                         30_000,
                         avd,
+                        mapOf("ANDROID_AVD_HOME" to avdHome.toString()),
                     ),
                 )
-            verifyRuntime(session.serial, configuration, contract)
+            try {
+                verifyRuntime(session.serial, configuration, contract)
+            } catch (error: Throwable) {
+                try {
+                    session.close()
+                } catch (cleanup: Throwable) {
+                    error.addSuppressed(cleanup)
+                }
+                throw error
+            }
             return OwnedSession(session, avd, configuration.accepted, marker)
         } catch (error: Throwable) {
-            deleteOwned(avd, marker, configuration.accepted)
+            try {
+                deleteOwned(avd, marker, configuration.accepted)
+            } catch (cleanup: Throwable) {
+                error.addSuppressed(cleanup)
+            }
             throw error
         }
     }
@@ -237,6 +259,7 @@ class LegacySdkEmulatorProvisioner(
         file: Path,
         expected: String,
         label: String,
+        expectedPackage: String? = null,
     ) {
         if (!Files.isRegularFile(
                 file,
@@ -245,8 +268,13 @@ class LegacySdkEmulatorProvisioner(
         ) {
             throw EmulatorProvisioningException("Requested $label metadata is missing.")
         }
-        val revision = Files.readAllLines(file).firstOrNull { it.startsWith("Pkg.Revision=") }?.substringAfter('=')
+        val lines = Files.readAllLines(file)
+        val revision = lines.firstOrNull { it.startsWith("Pkg.Revision=") }?.substringAfter('=')
         if (revision != expected) throw EmulatorProvisioningException("Requested $label revision does not match installed SDK metadata.")
+        val packageName = lines.firstOrNull { it.startsWith("Pkg.Path=") }?.substringAfter('=')
+        if (expectedPackage != null && packageName != null && packageName != expectedPackage) {
+            throw EmulatorProvisioningException("Requested system image package does not match installed SDK metadata.")
+        }
     }
 
     private fun deleteOwned(
@@ -254,19 +282,48 @@ class LegacySdkEmulatorProvisioner(
         marker: Path,
         accepted: AcceptedProvisioningContract,
     ) {
-        if (!Files.isRegularFile(marker, LinkOption.NOFOLLOW_LINKS) || !Files.readString(marker).contains(accepted.sha256.value)) return
-        Files.walk(directory).sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
+        val normalized = directory.toAbsolutePath().normalize()
+        val parent = normalized.parent ?: return
+        if (normalized.parent != parent || !Files.isDirectory(normalized, LinkOption.NOFOLLOW_LINKS)) return
+        if (!Files.isRegularFile(marker, LinkOption.NOFOLLOW_LINKS) || Files.isSymbolicLink(marker)) return
+        val attributes = Files.readAttributes(marker, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+        if (attributes.size() !in 1..4096) return
+        val expectedName = "droidproof-${accepted.sha256.value.take(24)}"
+        val markerText = Files.newInputStream(marker, LinkOption.NOFOLLOW_LINKS).use { it.readNBytes(4097) }
+        if (markerText.size > 4096) return
+        val markerJson =
+            runCatching {
+                json.decodeFromString<OwnershipMarker>(markerText.toString(StandardCharsets.UTF_8))
+            }.getOrNull() ?: return
+        if (markerJson != OwnershipMarker(1, accepted.sha256.value, expectedName, normalized.fileName.toString())) return
+        Files.walk(normalized).use { stream ->
+            stream.sorted(Comparator.reverseOrder()).forEach { path ->
+                if (!path.toAbsolutePath().normalize().startsWith(normalized)) return@forEach
+                Files.deleteIfExists(path)
+            }
+        }
     }
 
-    private class OwnedSession(
+    @Serializable
+    private data class OwnershipMarker(val schemaVersion: Int, val contractSha256: String, val avdName: String, val ownedDirectory: String)
+
+    private val json =
+        Json {
+            ignoreUnknownKeys = false
+            isLenient = false
+        }
+
+    private inner class OwnedSession(
         private val delegate: ManagedEmulatorSession,
         override val avdDirectory: Path,
         override val accepted: AcceptedProvisioningContract,
         private val marker: Path,
     ) : ProvisionedEmulator {
+        private val closed = AtomicBoolean(false)
         override val serial get() = delegate.serial
 
         override fun close() {
+            if (!closed.compareAndSet(false, true)) return
             var failure: Throwable? = null
             try {
                 delegate.close()
@@ -274,7 +331,7 @@ class LegacySdkEmulatorProvisioner(
                 failure = e
             }
             try {
-                Files.walk(avdDirectory).sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
+                deleteOwned(avdDirectory, marker, accepted)
             } catch (e: Throwable) {
                 if (failure != null) failure.addSuppressed(e) else throw e
             }

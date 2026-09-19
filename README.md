@@ -157,7 +157,7 @@ The owned AVD starts with `-wipe-data` and `-no-snapshot`, derives `emulator-<po
   -Pdroidproof.replaceExisting=true
 ```
 
-`deviceSerial` and `avdName` are mutually exclusive. External emulators are never stopped. Lifecycle startup/shutdown are bounded; provisioning, AVD creation, wiping, image provenance, and attestation remain out of scope.
+`deviceSerial` and `avdName` are mutually exclusive. External emulators are never stopped. Lifecycle startup/shutdown are bounded. The owned provisioning mode creates, wipes, verifies, stops, and removes only its marked AVD state; it is not remote attestation or universal emulator determinism.
 
 ```bash
 DROIDPROOF_KEY_DIR="$(mktemp -d /tmp/droidproof-ed25519.XXXXXX)"
@@ -291,7 +291,7 @@ The HTML is a derived view and is not itself evidence. See [ADR 0007](docs/adr/0
 - Host, Android, and server wall clocks are not treated as a shared causal clock. The controlled server's sequence establishes order only among its own exchanges.
 - Environment verification is limited to `persist.sys.locale`, locked user-0 `user_rotation` with `accelerometer_rotation=0`, and three global animation-scale settings. Auto-rotation, missing/malformed settings, unsupported Android output, and non-finite or negative scales are unavailable rather than guessed. These sequential point observations do not prove stability, effective application locale, physical posture, or full emulator determinism.
 - Live transaction mutation detection evaluates only the recorded checkpoints and narrow fields. `DRIFT_DETECTED` does not identify a cause or actor; `MATCHED` does not prove uninterrupted stability or the absence of other changes.
-- DroidProof mutates locale, rotation, and animation scales only in explicit `APPLY_AND_RESTORE` mode, then attempts bounded exact restoration. It does not provision or manage emulator lifecycle. Random seed and controlled clock remain explicitly unavailable.
+- DroidProof mutates locale, rotation, and animation scales only in explicit `APPLY_AND_RESTORE` mode, then attempts bounded exact restoration. Random seed and controlled clock remain explicitly unavailable.
 - Evidence hashes establish consistency with the manifest, not authenticity. For a signed bundle, successful integrity verification plus Ed25519 verification against an externally trusted public key authenticates the exact manifest/timeline core and transitively the manifest inventory. An unsigned bundle, or a signed bundle checked without an external trust key, makes no producer-authentication claim.
 - Bundle authentication establishes limited provenance from possession of the corresponding private key. It is not non-repudiation, trusted timestamping, certificate validation, key ownership discovery, revocation, transparency logging, remote attestation, or proof that the recorded observations are true. Compromised signing keys and external trusted-key distribution remain operator concerns.
 - Screenshots, UI hierarchy, scenario values, logcat, request metadata, response plans, and network evidence can contain sensitive test data. Keep bundles local or access-controlled; do not automatically upload them as public CI artifacts.
@@ -316,15 +316,18 @@ See [ADR 0008](docs/adr/0008-deterministic-network-evidence.md), [ADR 0009](docs
 | Exact HTTP request-contract verification | Implemented for one v4 JSON body/media type on `POST /orders` |
 | Real network exchange evidence and report section | Implemented with request contract outcome, issues, size, and SHA-256 |
 | Emulator lifecycle management | Implemented for bounded start/readiness/stop of one explicitly selected pre-existing AVD; externally supplied emulators remain externally owned |
-| Automatic environment mutation and restoration | Implemented only as explicit transactional application on the selected emulator; no lifecycle/provisioning |
-| Full deterministic emulator provisioning | Not implemented |
+| Automatic environment mutation and restoration | Implemented only as explicit transactional application on the selected emulator |
+| Owned legacy-SDK emulator provisioning | Implemented narrowly: exact already-installed SDK/image metadata, owned `ANDROID_AVD_HOME`, explicit port, wipe/no-snapshot, bounded lifecycle, and marked cleanup |
+| Android CLI migration | Required compatibility work; not implemented |
 | Arbitrary traffic interception or TLS MITM | Not implemented |
 | General endpoint scripting or generalized fault injection | Not implemented |
 | Compose semantics, Espresso, or application probes | Not implemented |
 | Published Gradle plugin, general CLI, or general-purpose scenario DSL | Not implemented |
 | PKI, certificate chains, revocation, timestamping, transparency, KMS/HSM, or remote attestation | Not implemented |
 
-The lease is not exclusive ownership of the emulator: Android Studio, people, arbitrary ADB, non-cooperating processes, other hosts, crashes, and SIGKILL remain outside its guarantee. The next recommended milestone is bounded APK signing-certificate identity evidence, closing the current producer-identity gap without changing the exact-byte binding or claiming remote attestation.
+The current provisioning backend deliberately invokes the deprecated legacy [`avdmanager`](https://developer.android.com/tools/avdmanager) and standalone [`emulator`](https://developer.android.com/studio/run/emulator-commandline) interfaces. Migration to [Android CLI](https://developer.android.com/tools/agents/android-cli) is not a mechanical command rename: DroidProof must establish parity for exact SDK/image selection, owned storage, deterministic serial/port association, clean-state startup, bounded shutdown, and supported host platforms first. GitHub workflow verification is SDK-free JVM testing; it does not prove a real emulator provisioning run.
+
+The lease is not exclusive ownership of the emulator: Android Studio, people, arbitrary ADB, non-cooperating processes, other hosts, crashes, and SIGKILL remain outside its guarantee. The next recommended milestone is Android CLI compatibility validation alongside real-host provisioning and APK signing-certificate identity evidence.
 
 ## Architecture decisions
 
