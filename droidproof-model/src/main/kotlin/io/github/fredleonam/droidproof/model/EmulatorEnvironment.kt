@@ -165,7 +165,8 @@ data class EmulatorEnvironmentEvaluationV1(
             "Animation scales are validated global settings read at one point in time.",
             "Environment evaluation is a bounded point-in-time observation and does not prove stability for the entire execution.",
             "Requested mutation and restoration are documented separately by environment transaction evidence.",
-            "DroidProof does not provision, start, or stop the emulator.",
+            "Emulator ownership and lifecycle behavior depend on the selected target mode and backend; " +
+                "this evaluation documents environment observations, not lifecycle provenance.",
         ),
 ) {
     init {
