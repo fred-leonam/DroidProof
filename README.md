@@ -127,6 +127,19 @@ To let DroidProof own the lifecycle of one already-created AVD, omit `deviceSeri
 
 Provisioning is opt-in and mutually exclusive with `deviceSerial` and `avdName`. It verifies installed SDK metadata and never downloads, updates packages, accepts licenses, or touches the normal Android Studio AVD directory. The contract is strict UTF-8 JSON (schema version 1):
 
+`-Pdroidproof.emulatorBackend=legacy` is the default and uses the existing `avdmanager` plus standalone `emulator` backend. Google has deprecated those interfaces in favor of Android CLI, but the legacy backend remains supported here because it is the only locally demonstrated deterministic provisioning implementation.
+
+An explicit `-Pdroidproof.emulatorBackend=android-cli` and `-Pdroidproof.androidCliPath=/absolute/path/to/android` selection is available as a fail-closed compatibility probe. It performs bounded version discovery only, then refuses provisioning unless the installed CLI has demonstrated isolated owned storage, exact image revision selection, clean-state creation, and unambiguous serial association. It never falls back to legacy, changes an SDK package, accepts a license, creates an AVD, or starts an emulator. This checkout found no `android` executable on PATH, so Android CLI behavior is JVM-tested only, not locally integration-tested.
+
+| Capability | legacy | android-cli |
+| --- | --- | --- |
+| Explicit SDK, exact package/revision, ABI, owned state, clean start, bounded lifecycle/removal | Implemented and JVM-tested | Not demonstrated; fail-closed before mutation |
+| CLI version / help compatibility discovery | N/A | Version probe only; local CLI unavailable |
+| `--sdk` / `--no-metrics` placement | N/A | Command builder JVM-tested; local help unverified |
+| Linux/macOS/Windows support | JVM code portable; SDK behavior host-dependent | Unverified |
+
+Android CLI does not yet have deterministic provisioning parity. Use `legacy` for managed provisioning, or `deviceSerial` for an externally owned target.
+
 ```json
 {"schemaVersion":1,"systemImagePackage":"system-images;android-35;google_apis;x86_64","systemImageRevision":"1","apiLevel":35,"abi":"x86_64","emulatorRevision":"35.1.4","platformToolsRevision":"35.0.2","commandLineToolsRevision":"12.0","deviceProfile":"pixel_5","buildFingerprint":"optional/exact/fingerprint"}
 ```
