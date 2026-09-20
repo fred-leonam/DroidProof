@@ -42,7 +42,12 @@ tasks.register<JavaExec>("runSmokeScenario") {
     mainClass.set("io.github.fredleonam.droidproof.host.RunSmokeScenarioKt")
     outputs.upToDateWhen { false }
     outputs.cacheIf { false }
-    args(layout.buildDirectory.dir("droidproof-runs").get().asFile.absolutePath)
+
+    fun option(
+        name: String,
+        value: String,
+    ) = args("--$name=$value")
+    option("outputRoot", layout.buildDirectory.dir("droidproof-runs").get().asFile.absolutePath)
     for ((name, default) in mapOf(
         "apkPath" to "",
         "scenarioPath" to "",
@@ -64,9 +69,11 @@ tasks.register<JavaExec>("runSmokeScenario") {
         "provisioningStateRoot" to layout.projectDirectory.dir(".droidproof-provisioning").asFile.absolutePath,
         "avdManagerPath" to "avdmanager",
     )) {
-        args(providers.gradleProperty("droidproof.$name").orElse(default).get())
+        option(name, providers.gradleProperty("droidproof.$name").orElse(default).get())
     }
-    args(project.version.toString())
+    option("version", project.version.toString())
+    option("emulatorBackend", providers.gradleProperty("droidproof.emulatorBackend").orElse("legacy").get())
+    option("androidCliPath", providers.gradleProperty("droidproof.androidCliPath").orElse("").get())
 }
 
 tasks.register<JavaExec>("recoverEmulatorEnvironment") {

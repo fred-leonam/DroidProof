@@ -95,6 +95,8 @@ data class EmulatorProvisioningConfiguration(
     val adbPath: Path,
     val port: Int,
     val timeoutMillis: Long = 120_000,
+    /** Explicit executable used only by the android-cli backend. */
+    val androidCliPath: Path? = null,
 ) {
     init {
         require(stateRoot.isAbsolute && sdkRoot.isAbsolute)
@@ -111,7 +113,7 @@ interface EmulatorProvisioner {
     fun provision(configuration: EmulatorProvisioningConfiguration): ProvisionedEmulator
 }
 
-class EmulatorProvisioningException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)
+open class EmulatorProvisioningException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)
 
 /** Legacy Android SDK command-line backend. It never invokes a shell or changes SDK packages. */
 class LegacySdkEmulatorProvisioner(
