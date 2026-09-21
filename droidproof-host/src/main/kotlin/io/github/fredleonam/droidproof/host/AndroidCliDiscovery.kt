@@ -160,7 +160,7 @@ internal class AndroidCliSurfaceDiscovery(private val runner: CommandRunner) {
         AndroidCliCommandObservation(AndroidCliCapabilityStatus.UNVERIFIED, reason, "")
 
     private fun String.hasExactOption(option: String) =
-        Regex("(^|\\s)${Regex.escape(option)}(?=\\s|$|[,\\]])", RegexOption.MULTILINE).containsMatchIn(this)
+        Regex("(^|[\\s\\[])${Regex.escape(option)}(?=\\s|$|[,\\]])", RegexOption.MULTILINE).containsMatchIn(this)
 
     private fun String.sdkOptionStyle() =
         if (!Regex("(^|\\s)--sdk=\\S+", RegexOption.MULTILINE).containsMatchIn(this) &&

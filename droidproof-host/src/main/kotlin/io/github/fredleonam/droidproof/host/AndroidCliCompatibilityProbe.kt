@@ -182,8 +182,7 @@ internal class AndroidCliCompatibilityProbe(
             code: AndroidCliIssueCode,
             explanation: String,
             vararg dependencies: AndroidCliCapabilityStatus,
-        ): AndroidCliCapabilityStatus =
-            aggregate(*dependencies).also { issues.add(code, it, explanation) }
+        ): AndroidCliCapabilityStatus = aggregate(*dependencies).also { issues.add(code, it, explanation) }
         return AndroidCliRequiredGuarantees(
             unresolved(
                 AndroidCliIssueCode.EXACT_IMAGE_PACKAGE_REVISION_NOT_PROVEN,

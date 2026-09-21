@@ -51,7 +51,14 @@ class AndroidCliCompatibilityTest {
     fun `missing non regular and non executable paths are distinguished without commands`() {
         val sdk = Files.createDirectory(directory.resolve("sdk"))
         val requests = mutableListOf<CommandRequest>()
-        val probe = AndroidCliCompatibilityProbe(CommandRunner { requests += it; successful(it) }, { "Mac OS X" })
+        val probe =
+            AndroidCliCompatibilityProbe(
+                CommandRunner {
+                    requests += it
+                    successful(it)
+                },
+                { "Mac OS X" },
+            )
 
         val missing = probe.inspect(AndroidCliProbeConfiguration(directory.resolve("missing"), sdk))
         assertEquals(AndroidCliCompatibilityOutcome.INCOMPATIBLE, missing.outcome)
@@ -238,7 +245,7 @@ class AndroidCliCompatibilityTest {
             }
 
         assertNotNull(error.report)
-        assertEquals(AndroidCliCompatibilityOutcome.UNVERIFIED, error.report?.outcome)
+        assertEquals(AndroidCliCompatibilityOutcome.UNVERIFIED, error.report.outcome)
         assertFalse(requests.any(::isMutating))
         assertFalse(requests.any { it.arguments.first().contains("avdmanager") })
         assertIs<AndroidCliEmulatorProvisioner>(EmulatorBackendFactory.provisioner(EmulatorBackend.ANDROID_CLI))
