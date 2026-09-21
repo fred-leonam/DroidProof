@@ -90,6 +90,7 @@ internal fun createSession(
                     adbPath,
                     configuration.emulatorPort,
                     configuration.lifecycleStartupTimeoutMillis,
+                    configuration.lifecycleShutdownTimeoutMillis,
                     configuration.androidCliPath,
                 ),
             )
