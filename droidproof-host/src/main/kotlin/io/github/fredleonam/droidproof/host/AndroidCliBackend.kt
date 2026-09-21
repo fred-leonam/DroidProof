@@ -1,9 +1,7 @@
 package io.github.fredleonam.droidproof.host
 
-import io.github.fredleonam.droidproof.device.CommandRequest
 import io.github.fredleonam.droidproof.device.CommandRunner
 import io.github.fredleonam.droidproof.device.ProcessCommandRunner
-import java.nio.file.Files
 
 /** Backend selection is explicit: there is deliberately no cross-backend fallback. */
 object EmulatorBackendFactory {
@@ -14,53 +12,36 @@ object EmulatorBackendFactory {
         }
 }
 
-data class AndroidCliCommand(val arguments: List<String>, val environment: Map<String, String>)
-
-/** Builds commands without a shell. The local CLI must prove this syntax before mutation is enabled. */
-object AndroidCliCommandBuilder {
-    fun discovery(
-        executable: String,
-        sdkRoot: String,
-        noMetricsSupported: Boolean,
-    ) = AndroidCliCommand(
-        buildList {
-            add(executable)
-            add("--sdk")
-            add(sdkRoot)
-            if (noMetricsSupported) add("--no-metrics")
-            add("emulator")
-            add("list")
-        },
-        emptyMap(),
-    )
-}
-
-class AndroidCliCompatibilityException(message: String) : EmulatorProvisioningException(message)
+class AndroidCliCompatibilityException internal constructor(
+    internal val report: AndroidCliCompatibilityReport?,
+    message: String,
+) : EmulatorProvisioningException(message)
 
 /** Fail-closed: no Android CLI mutation occurs before the installed surface proves the required guarantees. */
 class AndroidCliEmulatorProvisioner(
     private val runner: CommandRunner = ProcessCommandRunner(),
+    private val osName: () -> String = { System.getProperty("os.name").orEmpty() },
 ) : EmulatorProvisioner {
     override fun provision(configuration: EmulatorProvisioningConfiguration): ProvisionedEmulator {
         val executable =
             configuration.androidCliPath
-                ?: throw AndroidCliCompatibilityException("android-cli backend requires droidproof.androidCliPath.")
-        if (!Files.isRegularFile(executable) || !Files.isExecutable(executable)) {
-            throw AndroidCliCompatibilityException(
-                "Configured Android CLI executable is unavailable: $executable",
+                ?: throw AndroidCliCompatibilityException(
+                    null,
+                    "android-cli backend requires droidproof.androidCliPath. No SDK, AVD, or emulator was modified.",
+                )
+        val report =
+            AndroidCliCompatibilityProbe(runner, osName).inspect(
+                AndroidCliProbeConfiguration(
+                    executable,
+                    configuration.sdkRoot,
+                    configuration.timeoutMillis,
+                ),
             )
-        }
-        val result =
-            runner.execute(CommandRequest(listOf(executable.toString(), "--version"), configuration.timeoutMillis))
-        if (result.failure != null || result.exitCode != 0 || result.stdout.isBlank()) {
-            throw AndroidCliCompatibilityException(
-                "Android CLI version discovery failed within the configured timeout.",
-            )
-        }
         throw AndroidCliCompatibilityException(
-            "Android CLI compatibility is fail-closed: this installation has not demonstrated isolated owned storage, " +
-                "exact image revision selection, clean-state creation, and unambiguous serial association. " +
-                "No SDK, AVD, or emulator was modified.",
+            report,
+            "Android CLI provisioning refused (outcome=${report.outcome}; " +
+                "issues=${report.issues.joinToString(",") { it.code.name }}). " +
+                "Deterministic provisioning parity is not enabled; no SDK, AVD, or emulator was modified.",
         )
     }
 }

@@ -76,6 +76,24 @@ tasks.register<JavaExec>("runSmokeScenario") {
     option("androidCliPath", providers.gradleProperty("droidproof.androidCliPath").orElse("").get())
 }
 
+tasks.register<JavaExec>("probeAndroidCliCompatibility") {
+    group = "droidproof"
+    description = "Writes a bounded read-only Android CLI compatibility report."
+    classpath = sourceSets.main.get().runtimeClasspath
+    mainClass.set("io.github.fredleonam.droidproof.host.ProbeAndroidCliCompatibilityKt")
+    val report = layout.buildDirectory.file("reports/android-cli-compatibility.json")
+    outputs.file(report)
+    outputs.upToDateWhen { false }
+    outputs.cacheIf { false }
+    args("--androidCliPath=${providers.gradleProperty("droidproof.androidCliPath").orElse("").get()}")
+    args("--sdkRoot=${providers.gradleProperty("droidproof.sdkRoot").orElse("").get()}")
+    args(
+        "--timeoutMillis=" +
+            providers.gradleProperty("droidproof.androidCliProbeTimeoutMillis").orElse("15000").get(),
+    )
+    args("--outputPath=${report.get().asFile.absolutePath}")
+}
+
 tasks.register<JavaExec>("recoverEmulatorEnvironment") {
     group = "droidproof"
     description = "Explicitly restores a durable interrupted emulator-environment transaction."
