@@ -95,12 +95,14 @@ data class EmulatorProvisioningConfiguration(
     val adbPath: Path,
     val port: Int,
     val timeoutMillis: Long = 120_000,
+    val shutdownTimeoutMillis: Long = 30_000,
     /** Explicit executable used only by the android-cli backend. */
     val androidCliPath: Path? = null,
 ) {
     init {
         require(stateRoot.isAbsolute && sdkRoot.isAbsolute)
         require(port in 5554..5682 && port % 2 == 0)
+        require(timeoutMillis in 1..3_600_000 && shutdownTimeoutMillis in 1..3_600_000)
     }
 }
 
@@ -196,7 +198,7 @@ class LegacySdkEmulatorProvisioner(
                         configuration.adbPath,
                         configuration.port,
                         configuration.timeoutMillis,
-                        30_000,
+                        configuration.shutdownTimeoutMillis,
                         avd,
                         mapOf("ANDROID_AVD_HOME" to avdHome.toString()),
                     ),

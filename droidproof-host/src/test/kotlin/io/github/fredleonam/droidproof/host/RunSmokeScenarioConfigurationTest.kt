@@ -50,9 +50,18 @@ class RunSmokeScenarioConfigurationTest {
         }
     }
 
-    @Test fun `android cli command propagates sdk and supported metrics flag`() {
-        val command = AndroidCliCommandBuilder.discovery("/tools/android", "/sdk", true)
-        assertEquals(listOf("/tools/android", "--sdk", "/sdk", "--no-metrics", "emulator", "list"), command.arguments)
+    @Test fun `configured lifecycle timeouts parse independently`() {
+        val configuration =
+            RunSmokeScenarioConfiguration.parse(
+                arguments(
+                    "provisioningPath=/p",
+                    "sdkRoot=/sdk",
+                    "lifecycleStartupTimeoutMillis=1234",
+                    "lifecycleShutdownTimeoutMillis=5678",
+                ),
+            )
+        assertEquals(1234L, configuration.lifecycleStartupTimeoutMillis)
+        assertEquals(5678L, configuration.lifecycleShutdownTimeoutMillis)
     }
 
     private fun arguments(vararg overrides: String): Array<String> {

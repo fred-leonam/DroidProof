@@ -75,6 +75,8 @@ class EmulatorProvisioningTest {
                             ),
                             configuration.environment,
                         )
+                        assertEquals(1_234L, configuration.startupTimeoutMillis)
+                        assertEquals(5_678L, configuration.shutdownTimeoutMillis)
                         return object : ManagedEmulatorSession {
                             override val serial = "emulator-5554"
 
@@ -85,7 +87,9 @@ class EmulatorProvisioningTest {
                     }
                 }
             val session =
-                LegacySdkEmulatorProvisioner(runner, lifecycle).provision(config(accepted, sdk, state))
+                LegacySdkEmulatorProvisioner(runner, lifecycle).provision(
+                    config(accepted, sdk, state, startupTimeoutMillis = 1_234, shutdownTimeoutMillis = 5_678),
+                )
             val create = requests.single { it.arguments.contains("create") }
             assertEquals(
                 listOf(
@@ -135,15 +139,18 @@ class EmulatorProvisioningTest {
         accepted: AcceptedProvisioningContract,
         sdk: Path,
         state: Path,
+        startupTimeoutMillis: Long = 1_000,
+        shutdownTimeoutMillis: Long = 30_000,
     ) = EmulatorProvisioningConfiguration(
-        accepted,
-        sdk,
-        state,
-        Path.of("avdmanager"),
-        Path.of("emulator"),
-        Path.of("adb"),
-        5554,
-        1_000,
+        accepted = accepted,
+        sdkRoot = sdk,
+        stateRoot = state,
+        avdManagerPath = Path.of("avdmanager"),
+        emulatorPath = Path.of("emulator"),
+        adbPath = Path.of("adb"),
+        port = 5554,
+        timeoutMillis = startupTimeoutMillis,
+        shutdownTimeoutMillis = shutdownTimeoutMillis,
     )
 
     private fun sdk(root: Path): Path {

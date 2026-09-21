@@ -129,16 +129,29 @@ Provisioning is opt-in and mutually exclusive with `deviceSerial` and `avdName`.
 
 `-Pdroidproof.emulatorBackend=legacy` is the default and uses the existing `avdmanager` plus standalone `emulator` backend. Google has deprecated those interfaces in favor of Android CLI, but the legacy backend remains supported here because it is the only locally demonstrated deterministic provisioning implementation.
 
-An explicit `-Pdroidproof.emulatorBackend=android-cli` and `-Pdroidproof.androidCliPath=/absolute/path/to/android` selection is available as a fail-closed compatibility probe. It performs bounded version discovery only, then refuses provisioning unless the installed CLI has demonstrated isolated owned storage, exact image revision selection, clean-state creation, and unambiguous serial association. It never falls back to legacy, changes an SDK package, accepts a license, creates an AVD, or starts an emulator. This checkout found no `android` executable on PATH, so Android CLI behavior is JVM-tested only, not locally integration-tested.
+An explicit `-Pdroidproof.emulatorBackend=android-cli` and `-Pdroidproof.androidCliPath=/absolute/path/to/android` selection runs the same bounded capability probe used by the diagnostic task, then refuses provisioning. It never falls back to legacy, changes an SDK package, accepts a license, creates an AVD, or starts, stops, or removes an emulator. Help advertises command syntax; it does not prove runtime mutation permission or deterministic provisioning.
+
+Inspect one installed Android CLI without an APK, scenario, provisioning contract, AVD, or device:
+
+```bash
+./gradlew :droidproof-host:probeAndroidCliCompatibility \
+  -Pdroidproof.androidCliPath=/absolute/path/to/android \
+  -Pdroidproof.sdkRoot=/absolute/path/to/Android/Sdk \
+  -Pdroidproof.androidCliProbeTimeoutMillis=15000
+```
+
+The task prints a concise result and writes a strict, timestamp-free schema-v1 JSON report, including all six required provisioning guarantees, to `droidproof-host/build/reports/android-cli-compatibility.json`. It is opt-in, non-cacheable, and not part of `check`.
 
 | Capability | legacy | android-cli |
 | --- | --- | --- |
 | Explicit SDK, exact package/revision, ABI, owned state, clean start, bounded lifecycle/removal | Implemented and JVM-tested | Not demonstrated; fail-closed before mutation |
-| CLI version / help compatibility discovery | N/A | Version probe only; local CLI unavailable |
-| `--sdk` / `--no-metrics` placement | N/A | Command builder JVM-tested; local help unverified |
-| Linux/macOS/Windows support | JVM code portable; SDK behavior host-dependent | Unverified |
+| CLI version / help / list compatibility discovery | N/A | Implemented as a bounded read-only report and JVM-tested with fakes |
+| `--sdk` / `--no-metrics` placement | N/A | Uses documented `--sdk=<absolute-path>` before commands, unless installed help advertises only the separate form; adds `--no-metrics` only when help advertises it |
+| Linux/macOS/Windows support | JVM code portable; SDK behavior host-dependent | Windows emulator management is rejected; other hosts remain installation-specific |
 
-Android CLI does not yet have deterministic provisioning parity. Use `legacy` for managed provisioning, or `deviceSerial` for an externally owned target.
+On this macOS host, direct bounded read-only commands observed Android CLI `1.0.15985488`, accepted `--sdk=<path>`, and found `emulator create`, `list`, `start`, `stop`, and `remove`. Installed help did not advertise `--no-metrics`. The resulting compatibility remains `UNVERIFIED`: the surface did not demonstrate exact image package/revision selection, isolated owned state, an explicit wipe, deterministic port/serial association, bounded shutdown, or ownership-checked removal. No real Android CLI mutation was integration-tested. JVM tests cover option placement, command construction, interpretation, JSON determinism, Windows rejection, and refusal before mutation without requiring an SDK, device, network, or installed CLI. The Gradle diagnostic entry point was not executed on this host because its required JDK 17 toolchain was unavailable.
+
+Google's public Android CLI emulator surface currently lacks the controls needed by DroidProof's deterministic provisioning contract, and documents emulator commands as disabled on Windows. Android CLI provisioning parity is not implemented. Use `legacy` for managed provisioning, or `deviceSerial` for an externally owned target.
 
 ```json
 {"schemaVersion":1,"systemImagePackage":"system-images;android-35;google_apis;x86_64","systemImageRevision":"1","apiLevel":35,"abi":"x86_64","emulatorRevision":"35.1.4","platformToolsRevision":"35.0.2","commandLineToolsRevision":"12.0","deviceProfile":"pixel_5","buildFingerprint":"optional/exact/fingerprint"}
@@ -331,16 +344,16 @@ See [ADR 0008](docs/adr/0008-deterministic-network-evidence.md), [ADR 0009](docs
 | Emulator lifecycle management | Implemented for bounded start/readiness/stop of one explicitly selected pre-existing AVD; externally supplied emulators remain externally owned |
 | Automatic environment mutation and restoration | Implemented only as explicit transactional application on the selected emulator |
 | Owned legacy-SDK emulator provisioning | Implemented narrowly: exact already-installed SDK/image metadata, owned `ANDROID_AVD_HOME`, explicit port, wipe/no-snapshot, bounded lifecycle, and marked cleanup |
-| Android CLI migration | Required compatibility work; not implemented |
+| Android CLI compatibility boundary | Implemented read-only version/help/list capability report and guarded refusal; deterministic Android CLI provisioning parity remains unimplemented |
 | Arbitrary traffic interception or TLS MITM | Not implemented |
 | General endpoint scripting or generalized fault injection | Not implemented |
 | Compose semantics, Espresso, or application probes | Not implemented |
 | Published Gradle plugin, general CLI, or general-purpose scenario DSL | Not implemented |
 | PKI, certificate chains, revocation, timestamping, transparency, KMS/HSM, or remote attestation | Not implemented |
 
-The current provisioning backend deliberately invokes the deprecated legacy [`avdmanager`](https://developer.android.com/tools/avdmanager) and standalone [`emulator`](https://developer.android.com/studio/run/emulator-commandline) interfaces. Migration to [Android CLI](https://developer.android.com/tools/agents/android-cli) is not a mechanical command rename: DroidProof must establish parity for exact SDK/image selection, owned storage, deterministic serial/port association, clean-state startup, bounded shutdown, and supported host platforms first. GitHub workflow verification is SDK-free JVM testing; it does not prove a real emulator provisioning run.
+The functional provisioning backend deliberately invokes the legacy [`avdmanager`](https://developer.android.com/tools/avdmanager) and standalone [`emulator`](https://developer.android.com/studio/run/emulator-commandline) interfaces, which Google has deprecated. Migration to [Android CLI](https://developer.android.com/tools/agents/android-cli) is not a mechanical command rename: DroidProof must establish parity for exact SDK/image selection, owned storage, deterministic serial/port association, clean-state startup, bounded shutdown, safe cleanup, rollback, and runtime verification first. GitHub workflow verification is SDK-free JVM testing; it does not prove a real emulator provisioning run.
 
-The lease is not exclusive ownership of the emulator: Android Studio, people, arbitrary ADB, non-cooperating processes, other hosts, crashes, and SIGKILL remain outside its guarantee. The next recommended milestone is Android CLI compatibility validation alongside real-host provisioning and APK signing-certificate identity evidence.
+The lease is not exclusive ownership of the emulator: Android Studio, people, arbitrary ADB, non-cooperating processes, other hosts, crashes, and SIGKILL remain outside its guarantee. A future Android CLI mutating implementation requires the missing deterministic controls and rollback coverage; the read-only report must not be treated as provisioning support.
 
 ## Architecture decisions
 
@@ -360,3 +373,7 @@ The lease is not exclusive ownership of the emulator: Android Studio, people, ar
 - [ADR 0014](docs/adr/0014-emulator-capability-and-continuity-observation.md): emulator capability and continuity observation
 - [ADR 0015](docs/adr/0015-crash-resilient-environment-recovery-journal.md): crash-resilient environment recovery journal
 - [ADR 0016](docs/adr/0016-bounded-live-transaction-mutation-observation.md): bounded live-transaction mutation observation
+- [ADR 0017](docs/adr/0017-bounded-owned-emulator-lifecycle.md): bounded owned emulator lifecycle
+- [ADR 0018](docs/adr/0018-deterministic-owned-emulator-provisioning.md): deterministic owned emulator provisioning
+- [ADR 0019](docs/adr/0019-android-cli-compatibility-boundary.md): Android CLI compatibility boundary
+- [ADR 0020](docs/adr/0020-read-only-android-cli-capability-probe.md): read-only Android CLI capability probe
