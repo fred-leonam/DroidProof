@@ -8,6 +8,25 @@ DroidProof runs a small, controlled Android scenario and produces an evidence bu
 
 It is an early Kotlin/JVM prototype. Its APIs and schemas are not yet stable.
 
+## Read this guide in the order you need
+
+If you are new to DroidProof, do not start with emulator provisioning or signing. Take the smallest path first:
+
+1. Run `./gradlew check` to verify the project without Android.
+2. Generate the synthetic sample to see a real evidence bundle without a device.
+3. Follow [Run the sample scenario](#run-the-sample-scenario) when an authorized emulator is ready.
+4. Use [Read a bundle](#read-a-bundle) to turn any saved bundle into an offline report.
+
+The remaining sections describe target lifecycle, authentication, and recovery for more specialized use cases.
+
+### Three terms to know
+
+| Term | Plain-language meaning |
+| --- | --- |
+| **Scenario** | The small, versioned JSON declaration of what DroidProof should do and check. |
+| **Evidence bundle** | The output folder: declared inputs, observations, timeline, and an integrity inventory. |
+| **Report** | A disposable, offline HTML view generated from a bundle after it has been verified. |
+
 ## What problem does it solve?
 
 An ordinary UI test answers: **did this test pass right now?** DroidProof is aimed at a narrower, auditable question:
@@ -86,7 +105,16 @@ PID-filtered logcat is deliberately opt-in:
 
 ## Run the sample scenario
 
+![A DroidProof run, step by step](docs/images/droidproof-run-lifecycle.svg)
+
 The checked-in smoke app makes a real, controlled `POST /orders` request. The host starts a loopback-only server, maps the emulator’s stable port to it with ADB reverse, and checks the two expected requests: first a `503` retry response, then a `201` success response. The app finishes with `Order order-42 created`.
+
+### What you will do
+
+1. Build the demonstration APK with a local disposable signing key.
+2. Run the declared scenario against an already-authorized emulator.
+3. Find the new bundle below `droidproof-host/build/droidproof-runs/`.
+4. Generate and inspect an offline HTML report from that bundle.
 
 ### Prerequisites
 
@@ -247,6 +275,8 @@ Android CLI can be inspected but is intentionally fail-closed for provisioning:
 The read-only report is written to `droidproof-host/build/reports/android-cli-compatibility.json`. It does not prove that Android CLI can safely provision a DroidProof target.
 
 ## Read a bundle
+
+![What is inside a bundle](docs/images/droidproof-bundle-anatomy.svg)
 
 A successful network run contains evidence similar to this:
 

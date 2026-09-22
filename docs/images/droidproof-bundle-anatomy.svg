@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="500" viewBox="0 0 1200 500" role="img" aria-labelledby="title desc">
+  <title id="title">DroidProof evidence bundle anatomy</title>
+  <desc id="desc">A manifest and timeline connect to declared inputs, execution observations, and optional network evidence. The generated report verifies the manifest before displaying information.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#071425"/><stop offset="1" stop-color="#123956"/></linearGradient>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#7ee3ff"/></marker>
+    <style>text{font-family:Arial,Helvetica,sans-serif}.title{fill:#f2fbff;font-size:31px;font-weight:700}.sub{fill:#c0dce9;font-size:17px}.box{fill:#123b56;stroke:#7ee3ff;stroke-width:2}.core{fill:#1c5b67;stroke:#9cf2d1;stroke-width:2}.head{fill:#f2fbff;font-size:20px;font-weight:700}.copy{fill:#c0dce9;font-size:15px}.line{stroke:#7ee3ff;stroke-width:3;fill:none;marker-end:url(#arrow)}.small{fill:#a8d2df;font-size:14px}</style>
+  </defs>
+  <rect width="1200" height="500" rx="24" fill="url(#bg)"/>
+  <text x="60" y="64" class="title">What is kept in an evidence bundle?</text>
+  <text x="60" y="94" class="sub">The manifest inventories the accepted evidence files; the report trusts content only after verification.</text>
+  <g transform="translate(60 150)"><rect width="230" height="125" rx="16" class="core"/><text x="25" y="43" class="head">manifest.json</text><text x="25" y="72" class="copy">Paths · roles · sizes</text><text x="25" y="96" class="copy">SHA-256 inventory</text></g>
+  <g transform="translate(60 320)"><rect width="230" height="105" rx="16" class="box"/><text x="25" y="43" class="head">timeline.json</text><text x="25" y="72" class="copy">Ordered run events</text></g>
+  <g transform="translate(405 130)"><rect width="260" height="150" rx="16" class="box"/><text x="25" y="43" class="head">Declared inputs</text><text x="25" y="72" class="copy">scenario/scenario.json</text><text x="25" y="96" class="copy">environment contract</text><text x="25" y="120" class="copy">APK binding identity</text></g>
+  <g transform="translate(405 320)"><rect width="260" height="105" rx="16" class="box"/><text x="25" y="43" class="head">Observations</text><text x="25" y="72" class="copy">UI · screenshot · capture</text></g>
+  <g transform="translate(780 130)"><rect width="230" height="150" rx="16" class="box"/><text x="25" y="43" class="head">Network evidence</text><text x="25" y="72" class="copy">Exchange metadata</text><text x="25" y="96" class="copy">Status · hash · result</text><text x="25" y="120" class="copy">No raw bodies</text></g>
+  <g transform="translate(1005 310)"><rect width="135" height="115" rx="16" class="core"/><text x="21" y="43" class="head">Report</text><text x="21" y="71" class="copy">Verify first</text><text x="21" y="94" class="copy">Display later</text></g>
+  <path d="M290 211 H405" class="line"/><path d="M290 372 H405" class="line"/><path d="M665 205 H780" class="line"/><path d="M665 372 H1005" class="line"/><path d="M895 280 V310" class="line"/>
+  <text x="60" y="463" class="small">If an inventoried file is missing or modified, report generation remains diagnostic-only and does not display unverified details.</text>
+</svg>
