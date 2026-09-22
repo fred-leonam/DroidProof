@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="520" viewBox="0 0 1200 520" role="img" aria-labelledby="title desc">
+  <title id="title">DroidProof sample run lifecycle</title>
+  <desc id="desc">Five connected stages: declare inputs, check the Android target, run the bounded scenario, collect observations, and verify the evidence bundle.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#071425"/><stop offset="1" stop-color="#123956"/></linearGradient>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#7ee3ff"/></marker>
+    <style>text{font-family:Arial,Helvetica,sans-serif}.title{fill:#f2fbff;font-size:31px;font-weight:700}.subtitle{fill:#c0dce9;font-size:17px}.stage{fill:#123b56;stroke:#7ee3ff;stroke-width:2}.num{fill:#071425}.numbg{fill:#7ee3ff}.head{fill:#f2fbff;font-size:20px;font-weight:700}.copy{fill:#c0dce9;font-size:15px}.arrow{stroke:#7ee3ff;stroke-width:3;fill:none;marker-end:url(#arrow)}.note{fill:#9fc9d9;font-size:14px}</style>
+  </defs>
+  <rect width="1200" height="520" rx="24" fill="url(#bg)"/>
+  <text x="60" y="64" class="title">One bounded run, from inputs to evidence</text>
+  <text x="60" y="94" class="subtitle">The normal sample path uses an already-authorized emulator and a loopback-only mock server.</text>
+  <path d="M250 241 H290" class="arrow"/><path d="M480 241 H520" class="arrow"/><path d="M710 241 H750" class="arrow"/><path d="M940 241 H980" class="arrow"/>
+  <g transform="translate(60 160)"><rect width="190" height="164" rx="16" class="stage"/><circle cx="31" cy="31" r="18" class="numbg"/><text x="26" y="37" class="num" font-size="18" font-weight="700">1</text><text x="25" y="78" class="head">Declare</text><text x="25" y="106" class="copy">APK</text><text x="25" y="129" class="copy">Scenario + target</text><text x="25" y="152" class="copy">Environment contract</text></g>
+  <g transform="translate(290 160)"><rect width="190" height="164" rx="16" class="stage"/><circle cx="31" cy="31" r="18" class="numbg"/><text x="26" y="37" class="num" font-size="18" font-weight="700">2</text><text x="25" y="78" class="head">Prepare</text><text x="25" y="106" class="copy">Preflight target</text><text x="25" y="129" class="copy">Bind exact APK</text><text x="25" y="152" class="copy">Start local server</text></g>
+  <g transform="translate(520 160)"><rect width="190" height="164" rx="16" class="stage"/><circle cx="31" cy="31" r="18" class="numbg"/><text x="26" y="37" class="num" font-size="18" font-weight="700">3</text><text x="25" y="78" class="head">Execute</text><text x="25" y="106" class="copy">Launch app</text><text x="25" y="129" class="copy">Perform UI steps</text><text x="25" y="152" class="copy">Check final state</text></g>
+  <g transform="translate(750 160)"><rect width="190" height="164" rx="16" class="stage"/><circle cx="31" cy="31" r="18" class="numbg"/><text x="26" y="37" class="num" font-size="18" font-weight="700">4</text><text x="25" y="78" class="head">Observe</text><text x="25" y="106" class="copy">UI + screenshot</text><text x="25" y="129" class="copy">Device metadata</text><text x="25" y="152" class="copy">HTTP metadata</text></g>
+  <g transform="translate(980 160)"><rect width="160" height="164" rx="16" class="stage"/><circle cx="31" cy="31" r="18" class="numbg"/><text x="26" y="37" class="num" font-size="18" font-weight="700">5</text><text x="25" y="78" class="head">Verify</text><text x="25" y="106" class="copy">Inventory</text><text x="25" y="129" class="copy">SHA-256</text><text x="25" y="152" class="copy">HTML report</text></g>
+  <path d="M155 377 H1045" stroke="#2c6681" stroke-width="2" stroke-dasharray="7 7"/>
+  <text x="60" y="425" class="note">A behavior mismatch still creates a partial, integrity-checked bundle; an execution error or cancellation is recorded distinctly.</text>
+  <text x="60" y="461" class="note">Cleanup removes the owned ADB reverse mapping and loopback server after completion, failure, timeout, cancellation, or host error.</text>
+</svg>
