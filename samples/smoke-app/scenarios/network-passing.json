@@ -9,6 +9,7 @@
     "path": "/orders",
     "requestBodyLimitBytes": 4096,
     "responseBodyLimitBytes": 4096,
+    "transport": "HTTPS",
     "responsePlan": [
       {
         "status": 503,

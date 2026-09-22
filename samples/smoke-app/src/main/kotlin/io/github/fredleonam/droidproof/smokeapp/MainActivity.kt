@@ -68,7 +68,7 @@ class MainActivity : Activity() {
     }
 
     private fun postOrder(name: String): HttpResponse {
-        val connection = URL("http://127.0.0.1:$DROIDPROOF_DEVICE_PORT/orders").openConnection() as HttpURLConnection
+        val connection = URL("https://127.0.0.1:$DROIDPROOF_DEVICE_PORT/orders").openConnection() as HttpURLConnection
         connection.connectTimeout = NETWORK_TIMEOUT_MILLIS
         connection.readTimeout = NETWORK_TIMEOUT_MILLIS
         connection.requestMethod = "POST"

@@ -2,20 +2,30 @@ package io.github.fredleonam.droidproof.mockserver
 
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
+import com.sun.net.httpserver.HttpsConfigurator
+import com.sun.net.httpserver.HttpsServer
 import kotlinx.serialization.Serializable
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.nio.charset.StandardCharsets
+import java.security.KeyFactory
+import java.security.KeyStore
 import java.security.MessageDigest
+import java.security.cert.CertificateFactory
+import java.security.spec.PKCS8EncodedKeySpec
 import java.time.Clock
+import java.util.Base64
 import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import javax.net.ssl.KeyManagerFactory
+import javax.net.ssl.SSLContext
 
 @Serializable
 data class PlannedHttpResponse(
@@ -34,6 +44,7 @@ data class MockServerPlan(
     val path: String,
     val responses: List<PlannedHttpResponse>,
     val expectedRequest: ExpectedHttpRequest? = null,
+    val transport: NetworkTransport = NetworkTransport.HTTP,
 ) {
     init {
         require(method in SUPPORTED_METHODS) { "Only the POST method is supported by this milestone." }
@@ -41,6 +52,9 @@ data class MockServerPlan(
         require(responses.size in 1..MAX_RESPONSES) { "A response plan must contain 1 to $MAX_RESPONSES responses." }
     }
 }
+
+/** Transport is declared by the scenario; TLS is only available on DroidProof's loopback server. */
+enum class NetworkTransport { HTTP, HTTPS }
 
 data class ExpectedHttpRequest(
     val mediaType: String,
@@ -159,7 +173,11 @@ class DeterministicMockServer(private val clock: Clock = Clock.systemUTC()) : Mo
             Executors.newSingleThreadExecutor { task ->
                 Thread(task, "droidproof-mock-server").apply { isDaemon = true }
             }
-        val server = HttpServer.create(InetSocketAddress(IPV4_LOOPBACK, 0), 0)
+        val server =
+            when (plan.transport) {
+                NetworkTransport.HTTP -> HttpServer.create(InetSocketAddress(IPV4_LOOPBACK, 0), 0)
+                NetworkTransport.HTTPS -> tlsServer(InetSocketAddress(IPV4_LOOPBACK, 0))
+            }
         return try {
             val state =
                 ServerState(plan, limits, clock) {
@@ -185,6 +203,41 @@ class DeterministicMockServer(private val clock: Clock = Clock.systemUTC()) : Mo
         }
     }
 }
+
+private fun tlsServer(address: InetSocketAddress): HttpsServer =
+    HttpsServer.create(address, 0).also { server ->
+        server.httpsConfigurator = HttpsConfigurator(loopbackSslContext())
+    }
+
+/**
+ * The sample-only loopback identity is deliberately public and must never be used beyond the
+ * local ADB-reversed test endpoint. Its matching certificate is bundled by the smoke app as a
+ * narrow app trust anchor; it is not installed on the Android system or user trust store.
+ */
+private fun loopbackSslContext(): SSLContext {
+    val certificate =
+        CertificateFactory.getInstance("X.509").generateCertificate(
+            ByteArrayInputStream(Base64.getDecoder().decode(LOOPBACK_CERTIFICATE_PEM)),
+        )
+    val privateKey =
+        KeyFactory.getInstance("EC").generatePrivate(
+            PKCS8EncodedKeySpec(Base64.getDecoder().decode(LOOPBACK_PRIVATE_KEY_PEM)),
+        )
+    val keyStore = KeyStore.getInstance(KeyStore.getDefaultType()).apply {
+        load(null, null)
+        setKeyEntry("droidproof-loopback", privateKey, CharArray(0), arrayOf(certificate))
+    }
+    val keyManagers = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm()).apply {
+        init(keyStore, CharArray(0))
+    }
+    return SSLContext.getInstance("TLS").apply { init(keyManagers.keyManagers, null, null) }
+}
+
+private const val LOOPBACK_PRIVATE_KEY_PEM =
+    "LS0tLS1CRUdJTiBFQyBQUklWQVRFIEtFWS0tLS0tCk1IY0NBUUVFSUlRM0VGVTl5SERGczI5MUJCY2ZCbUNwbmxZNk1INEF3M2ZvVmZkdzFXQzVvQW9HQ0NxR1NNNDkKQXdFSG9VUURRZ0FFSUhTYkFlbUd3OU9tdlh3UUNwMFZJWDNnc2xVRDEwRndLU3NmZDF0eWVaT0VMR0NKR1gvZQpPcFBJRFp2dWQ0b2V6cC8vSXB4eG91a3Y2c1pReWpNR2pBPT0KLS0tLS1FTkQgRUMgUFJJVkFURSBLRVktLS0tLQo="
+
+private const val LOOPBACK_CERTIFICATE_PEM =
+    "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUJqakNDQVRTZ0F3SUJBZ0lVRUxuM3JCUDQ2YjVMN1ZQUVc4ZWxtQUJ1SUxvd0NnWUlLb1pJemowRUF3SXcKRkRFU01CQUdBMVVFQXd3Sk1USTNMakF1TUM0eE1CNFhEVEkyTURreU1qSXhNak0wT0ZvWERUTTJNRGt4T1RJeApNak0wT0Zvd0ZERVNNQkFHQTFVRUF3d0pNVEkzTGpBdU1DNHhNRmt3RXdZSEtvWkl6ajBDQVFZSUtvWkl6ajBECkFRY0RRZ0FFSUhTYkFlbUd3OU9tdlh3UUNwMFZJWDNnc2xVRDEwRndLU3NmZDF0eWVaT0VMR0NKR1gvZU9wUEkKRFp2dWQ0b2V6cC8vSXB4eG91a3Y2c1pReWpNR2pLTmtNR0l3SFFZRFZSME9CQllFRkJMTFRjdlJUQVQ2ZVdDUQo0UUtXUHdlU0NBWCtNQjhHQTFVZEl3UVlNQmFBRkJMTFRjdlJUQVQ2ZVdDUTRRS1dQd2VTQ0FYK01BOEdBMVVkCkV3RUIvd1FGTUFNQkFmOHdEd1lEVlIwUkJBZ3dCb2NFZndBQUFUQUtCZ2dxaGtqT1BRUURBZ05JQURCRkFpRUEKN24vN29QNTNvVkJPQXdjMUJ3K3dqMUpaRGJrdzV4dFFySG5NZUI0UUxkd0NJSFdTTlZDRHI5SUNLcFU5YzF3awphYnZxY0plamRTSllFNU03MGJTU2FYQSsKLS0tLS1FTkQgQ0VSVElGSUNBVEUtLS0tLQo="
 
 private class RunningServer(
     private val server: HttpServer,
