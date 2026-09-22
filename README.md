@@ -107,7 +107,7 @@ PID-filtered logcat is deliberately opt-in:
 
 ![A DroidProof run, step by step](docs/images/droidproof-run-lifecycle.svg)
 
-The checked-in smoke app makes a real, controlled `POST /orders` request. The host starts a loopback-only server, maps the emulator’s stable port to it with ADB reverse, and checks the two expected requests: first a `503` retry response, then a `201` success response. The app finishes with `Order order-42 created`.
+The checked-in smoke app makes a real, controlled HTTPS `POST /orders` request. The host starts a loopback-only TLS server, maps the emulator’s stable port to it with ADB reverse, and checks the two expected requests: first a `503` retry response, then a `201` success response. The app finishes with `Order order-42 created`.
 
 ### What you will do
 
@@ -378,7 +378,7 @@ Recovery only writes when a fresh API level, build fingerprint, and boot identif
 | Reports | Deterministic, offline static HTML generated only from verified evidence |
 | Authentication | Optional JDK 17 Ed25519 signature with caller-supplied external public key |
 
-Not implemented: arbitrary endpoint scripting, TLS MITM or general traffic interception, Compose/Espresso probes, a general-purpose scenario DSL or published Gradle plugin, PKI/revocation/timestamping, KMS/HSM integration, and remote attestation.
+Not implemented: arbitrary endpoint scripting, TLS MITM or general traffic interception, Compose/Espresso probes, a general-purpose scenario DSL or published Gradle plugin, PKI/revocation/timestamping, KMS/HSM integration, and remote attestation. The sample supports only explicit loopback TLS termination; it does not install a CA or redirect traffic.
 
 ## Contracts and safety boundaries
 

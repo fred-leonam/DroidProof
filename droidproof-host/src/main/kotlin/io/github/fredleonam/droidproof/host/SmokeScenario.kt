@@ -4,6 +4,7 @@ import io.github.fredleonam.droidproof.evidence.Sha256Calculator
 import io.github.fredleonam.droidproof.mockserver.ExpectedHttpRequest
 import io.github.fredleonam.droidproof.mockserver.MockServerLimits
 import io.github.fredleonam.droidproof.mockserver.MockServerPlan
+import io.github.fredleonam.droidproof.mockserver.NetworkTransport
 import io.github.fredleonam.droidproof.mockserver.PlannedHttpResponse
 import io.github.fredleonam.droidproof.model.ScenarioId
 import io.github.fredleonam.droidproof.model.Sha256
@@ -44,9 +45,10 @@ interface BackendPlanDefinition {
     val requestBodyLimitBytes: Long
     val responseBodyLimitBytes: Long
     val responsePlan: List<PlannedHttpResponse>
+    val transport: NetworkTransport get() = NetworkTransport.HTTP
     val mockServerExpectedRequest: ExpectedHttpRequest? get() = null
 
-    fun serverPlan(): MockServerPlan = MockServerPlan(method, path, responsePlan, mockServerExpectedRequest)
+    fun serverPlan(): MockServerPlan = MockServerPlan(method, path, responsePlan, mockServerExpectedRequest, transport)
 
     fun serverLimits(): MockServerLimits =
         MockServerLimits(
@@ -64,6 +66,7 @@ data class ScenarioBackendPlan(
     override val requestBodyLimitBytes: Long,
     override val responseBodyLimitBytes: Long,
     override val responsePlan: List<PlannedHttpResponse>,
+    override val transport: NetworkTransport = NetworkTransport.HTTP,
 ) : BackendPlanDefinition {
     init {
         validateBackendPlan(this, 3)
@@ -94,6 +97,7 @@ data class ScenarioBackendPlanV4(
     override val responseBodyLimitBytes: Long,
     val expectedRequest: ScenarioExpectedRequest,
     override val responsePlan: List<PlannedHttpResponse>,
+    override val transport: NetworkTransport = NetworkTransport.HTTP,
 ) : BackendPlanDefinition {
     override val mockServerExpectedRequest: ExpectedHttpRequest get() = expectedRequest.serverContract()
 
