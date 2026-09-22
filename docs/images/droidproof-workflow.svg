@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420" role="img" aria-labelledby="title desc">
+  <title id="title">DroidProof evidence workflow</title>
+  <desc id="desc">An APK, scenario, and environment contract are run on Android. UI and mock-server observations become a verified evidence bundle and offline report.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#071425"/><stop offset="1" stop-color="#0e2a42"/></linearGradient>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#75d4ff"/></marker>
+    <style>text{font-family:Arial,Helvetica,sans-serif}.label{fill:#ecf8ff;font-size:22px;font-weight:700}.copy{fill:#b9d8e8;font-size:15px}.small{fill:#b9d8e8;font-size:14px}.box{stroke:#75d4ff;stroke-width:2}.line{stroke:#75d4ff;stroke-width:3;fill:none;marker-end:url(#arrow)}</style>
+  </defs>
+  <rect width="1200" height="420" rx="24" fill="url(#bg)"/>
+  <text x="60" y="63" class="label" font-size="30">From Android run to inspectable evidence</text>
+  <text x="60" y="91" class="copy">DroidProof binds the declared inputs, records bounded observations, and verifies the published bundle.</text>
+  <rect x="60" y="155" width="210" height="130" rx="16" fill="#123a54" class="box"/>
+  <text x="85" y="198" class="label">Declared inputs</text>
+  <text x="85" y="227" class="copy">Exact APK</text><text x="85" y="250" class="copy">Scenario + environment</text>
+  <path d="M270 220 H355" class="line"/>
+  <rect x="360" y="135" width="220" height="170" rx="16" fill="#164b60" class="box"/>
+  <text x="397" y="185" class="label">Android target</text>
+  <text x="397" y="214" class="copy">Preflight · install</text><text x="397" y="237" class="copy">UI steps · capture</text><text x="397" y="260" class="copy">Observed checkpoints</text>
+  <path d="M580 190 H670" class="line"/><path d="M580 255 H670" class="line"/>
+  <rect x="675" y="135" width="210" height="170" rx="16" fill="#164b60" class="box"/>
+  <text x="708" y="185" class="label">Observations</text>
+  <text x="708" y="214" class="copy">UI hierarchy + image</text><text x="708" y="237" class="copy">Environment metadata</text><text x="708" y="260" class="copy">Controlled HTTP exchange</text>
+  <path d="M885 220 H970" class="line"/>
+  <rect x="975" y="155" width="165" height="130" rx="16" fill="#1b5b59" class="box"/>
+  <text x="1000" y="198" class="label">Bundle</text>
+  <text x="1000" y="227" class="copy">Inventory + hashes</text><text x="1000" y="250" class="copy">Timeline + report</text>
+  <text x="60" y="365" class="small">Bounded evidence, not continuous monitoring or remote attestation.</text>
+</svg>
