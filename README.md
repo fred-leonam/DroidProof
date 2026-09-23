@@ -187,6 +187,8 @@ sequenceDiagram
 
 The host writes a fresh run directory below `droidproof-host/build/droidproof-runs/` and prints its location. If mock-server setup fails, DroidProof does not fall back to LAN or uncontrolled networking. Owned mappings and the server are cleaned up after success, assertion failure, timeout, cancellation, or host failure.
 
+`network-fault-passing.json` is the schema-v5 retry example: its first planned exchange deliberately closes the loopback connection, and its second returns the successful order response. V5 also supports a declared response delay of up to five seconds. These faults apply only to this controlled endpoint.
+
 ### See a deliberate failure
 
 Use `network-request-failing.json` in place of the passing scenario:
@@ -373,7 +375,7 @@ Recovery only writes when a fresh API level, build fingerprint, and boot identif
 | Evidence | Schema v1/v2/v3 reader and verifier; v3 execution bundles; SHA-256 inventory |
 | Android capture | Bounded screenshots, allowlisted metadata, optional PID-filtered logcat |
 | UI execution | Narrow View resource-ID text input, tap, and exact-text assertion |
-| Network | One controlled loopback `POST /orders` endpoint with ordered response and request-contract checks |
+| Network | One controlled loopback `POST /orders` endpoint with ordered response, request-contract, and bounded v5 delay/connection-close faults |
 | Target lifecycle | External device, existing AVD, or narrowly owned legacy-SDK provisioned AVD |
 | Reports | Deterministic, offline static HTML generated only from verified evidence |
 | Authentication | Optional JDK 17 Ed25519 signature with caller-supplied external public key |
@@ -382,7 +384,7 @@ Not implemented: arbitrary endpoint scripting, TLS MITM or general traffic inter
 
 ## Contracts and safety boundaries
 
-- Scenario schemas v1–v4 remain readable. V4 adds strict matching for the single controlled JSON request; it does not provide arbitrary scripting.
+- Scenario schemas v1–v5 remain readable. V4 adds strict matching for the single controlled JSON request; V5 adds bounded delay and connection-close faults for that same endpoint.
 - Environment contracts, environment evaluations, capability observations, continuity observations, transaction-mutation observations, evidence, and authentication each have separate versioned schemas.
 - A matching environment or checkpoint is a sequential point observation. It does not prove stability between checks, actor identity, exclusive ownership, or the absence of unrelated changes.
 - The mock server proves only what it observed on its controlled endpoint. It does not prove that no other network traffic occurred.

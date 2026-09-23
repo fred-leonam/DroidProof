@@ -5,6 +5,7 @@ import io.github.fredleonam.droidproof.evidence.Sha256Calculator
 import io.github.fredleonam.droidproof.mockserver.MockServerStarter
 import io.github.fredleonam.droidproof.mockserver.ObservedHttpExchange
 import io.github.fredleonam.droidproof.mockserver.RequestContractOutcome
+import io.github.fredleonam.droidproof.mockserver.ResponseFaultKind
 import io.github.fredleonam.droidproof.mockserver.RunningMockServer
 import io.github.fredleonam.droidproof.model.BundleRelativePath
 import io.github.fredleonam.droidproof.model.EventId
@@ -176,6 +177,7 @@ internal class ActiveNetworkSession(
                 val (observed, expected) = pair
                 val expectedResponse = expected.body.toByteArray(StandardCharsets.UTF_8)
                 val expectedRequest = plan.mockServerExpectedRequest?.bodyBytesForHost()
+                val expectedDrop = expected.fault?.kind == ResponseFaultKind.DROP_CONNECTION
                 observed.sequence == zeroBased + 1 &&
                     observed.matchedResponsePlan &&
                     observed.responsePlanIndex == zeroBased + 1 &&
@@ -184,11 +186,17 @@ internal class ActiveNetworkSession(
                     observed.method == plan.method &&
                     observed.path == plan.path &&
                     observed.responseStatus == expected.status &&
-                    observed.responseBody.capturedByteSize == expectedResponse.size.toLong() &&
-                    observed.responseBody.sha256 ==
-                    Sha256Calculator.calculate(ByteArrayInputStream(expectedResponse)).value &&
+                    observed.injectedFault == expected.fault &&
+                    observed.responseDelivered != expectedDrop &&
+                    (if (expectedDrop) {
+                        observed.responseBody.capturedByteSize == 0L && !observed.responseBody.complete
+                    } else {
+                        observed.responseBody.capturedByteSize == expectedResponse.size.toLong() &&
+                            observed.responseBody.sha256 ==
+                            Sha256Calculator.calculate(ByteArrayInputStream(expectedResponse)).value &&
+                            observed.responseBody.complete
+                    }) &&
                     observed.requestBody.complete &&
-                    observed.responseBody.complete &&
                     (
                         expectedRequest == null ||
                             (
@@ -215,6 +223,8 @@ private fun ObservedHttpExchange.timelineEvent(path: BundleRelativePath): Timeli
                 "method" to method,
                 "path" to this.path,
                 "responseStatus" to responseStatus.toString(),
+                "responseDelivered" to responseDelivered.toString(),
+                "injectedFault" to (injectedFault?.kind?.name ?: ""),
                 "serverSequence" to sequence.toString(),
                 "requestBytes" to requestBody.capturedByteSize.toString(),
                 "requestSha256" to requestBody.sha256,

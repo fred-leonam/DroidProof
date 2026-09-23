@@ -100,13 +100,6 @@ data class ScenarioBackendPlanV4(
     override val transport: NetworkTransport = NetworkTransport.HTTP,
 ) : BackendPlanDefinition {
     override val mockServerExpectedRequest: ExpectedHttpRequest get() = expectedRequest.serverContract()
-
-    init {
-        validateBackendPlan(this, 4)
-        require(expectedRequest.body.toByteArray(StandardCharsets.UTF_8).size.toLong() <= requestBodyLimitBytes) {
-            "Expected request body exceeds the configured request-body limit."
-        }
-    }
 }
 
 @Serializable
@@ -210,6 +203,28 @@ data class SmokeScenarioV4(
 
     init {
         require(schemaVersion == 4) { "Unsupported scenario schema version." }
+        validateBackendPlan(backendPlan, 4)
+        validateExpectedRequestSize(backendPlan)
+        validateOrderedScenario(expectedPackage, launchComponent, steps)
+    }
+}
+
+/** Schema v5 permits bounded deterministic response faults in the controlled backend plan. */
+@Serializable
+data class SmokeScenarioV5(
+    override val schemaVersion: Int,
+    override val scenarioId: ScenarioId,
+    override val expectedPackage: String,
+    override val launchComponent: String,
+    override val backendPlan: ScenarioBackendPlanV4,
+    val steps: List<ScenarioStep>,
+) : ScenarioDefinition {
+    override val orderedSteps: List<ScenarioStep> get() = steps
+
+    init {
+        require(schemaVersion == 5) { "Unsupported scenario schema version." }
+        validateBackendPlan(backendPlan, 5)
+        validateExpectedRequestSize(backendPlan)
         validateOrderedScenario(expectedPackage, launchComponent, steps)
     }
 }
@@ -297,6 +312,7 @@ object SmokeScenarioLoader {
                 2 -> scenarioJson.decodeFromString<SmokeScenarioV2>(text)
                 3 -> scenarioJson.decodeFromString<SmokeScenarioV3>(text)
                 4 -> scenarioJson.decodeFromString<SmokeScenarioV4>(text)
+                5 -> scenarioJson.decodeFromString<SmokeScenarioV5>(text)
                 else -> error("Unsupported scenario schema version: $version.")
             }
         return AcceptedScenario(scenario, bytes, Sha256Calculator.calculate(ByteArrayInputStream(bytes)))
@@ -311,6 +327,11 @@ private fun validateBackendPlan(
     require(plan.requestBodyLimitBytes in 1..MAX_NETWORK_BODY_BYTES) { "Request-body limit is outside supported bounds." }
     require(plan.responseBodyLimitBytes in 1..MAX_NETWORK_BODY_BYTES) { "Response-body limit is outside supported bounds." }
     val serverPlan = MockServerPlan(plan.method, plan.path, plan.responsePlan, plan.mockServerExpectedRequest)
+    if (schemaVersion < 5) {
+        require(plan.responsePlan.none { it.fault != null }) {
+            "Response fault injection requires scenario schema version 5."
+        }
+    }
     plan.responsePlan.forEach { response ->
         require(response.mediaType == "application/json") { "Scenario-v$schemaVersion responses must use application/json." }
         require(runCatching { scenarioJson.parseToJsonElement(response.body) }.isSuccess) {
@@ -332,6 +353,12 @@ private fun validateOrderedScenario(
     require(steps.size in 1..100) { "Scenario must contain 1 to 100 steps." }
     require(steps.last() is AssertUiNode) { "Scenario must end with an assertion." }
     steps.forEach { validateResource(expectedPackage, it.resourceId) }
+}
+
+private fun validateExpectedRequestSize(plan: ScenarioBackendPlanV4) {
+    require(plan.expectedRequest.body.toByteArray(StandardCharsets.UTF_8).size.toLong() <= plan.requestBodyLimitBytes) {
+        "Expected request body exceeds the configured request-body limit."
+    }
 }
 
 private const val MAX_SCENARIO_BYTES = 1024L * 1024L
