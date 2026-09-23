@@ -53,7 +53,11 @@ class MainActivity : Activity() {
 
     private fun submitOrder(name: String): String {
         repeat(2) { attempt ->
-            val response = runCatching { postOrder(name) }.getOrNull() ?: return getString(R.string.order_failed)
+            val response = runCatching { postOrder(name) }.getOrNull()
+            if (response == null) {
+                if (attempt == 1) return getString(R.string.order_failed)
+                return@repeat
+            }
             if (response.status == 201) {
                 val orderId = runCatching { JSONObject(response.body).getString("orderId") }.getOrNull()
                 return if (orderId != null && SAFE_ORDER_ID.matches(orderId)) {

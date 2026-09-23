@@ -28,10 +28,35 @@ import javax.net.ssl.KeyManagerFactory
 import javax.net.ssl.SSLContext
 
 @Serializable
+enum class ResponseFaultKind {
+    DELAY_RESPONSE,
+    DROP_CONNECTION,
+}
+
+/** A bounded fault applied after request collection and before a planned response is sent. */
+@Serializable
+data class ResponseFault(
+    val kind: ResponseFaultKind,
+    val delayMillis: Long = 0,
+) {
+    init {
+        when (kind) {
+            ResponseFaultKind.DELAY_RESPONSE ->
+                require(delayMillis in 1..MAX_FAULT_DELAY_MILLIS) {
+                    "Response delay must be between 1 and $MAX_FAULT_DELAY_MILLIS milliseconds."
+                }
+            ResponseFaultKind.DROP_CONNECTION ->
+                require(delayMillis == 0L) { "A dropped connection cannot also specify a response delay." }
+        }
+    }
+}
+
+@Serializable
 data class PlannedHttpResponse(
     val status: Int,
     val body: String,
     val mediaType: String = "application/json",
+    val fault: ResponseFault? = null,
 ) {
     init {
         require(status in 200..599) { "Planned HTTP status must be between 200 and 599." }
@@ -125,6 +150,8 @@ data class ObservedHttpExchange(
     val requestBody: HttpBodyObservation,
     val responseStatus: Int,
     val responseBody: HttpBodyObservation,
+    val responseDelivered: Boolean = true,
+    val injectedFault: ResponseFault? = null,
     val matchedResponsePlan: Boolean,
     val responsePlanIndex: Int? = null,
     val methodComplete: Boolean = true,
@@ -301,7 +328,13 @@ private class ServerState(
                             path = observedTarget,
                             requestBody = request.observation,
                             responseStatus = selected.status,
-                            responseBody = bodyObservation(selected.body, complete = true),
+                            responseBody =
+                                bodyObservation(
+                                    if (selected.fault?.kind == ResponseFaultKind.DROP_CONNECTION) EMPTY_BODY else selected.body,
+                                    complete = selected.fault?.kind != ResponseFaultKind.DROP_CONNECTION,
+                                ),
+                            responseDelivered = selected.fault?.kind != ResponseFaultKind.DROP_CONNECTION,
+                            injectedFault = selected.fault,
                             matchedResponsePlan = selected.planIndex != null,
                             responsePlanIndex = selected.planIndex,
                             methodComplete = observedMethod.length == exchange.requestMethod.length,
@@ -319,6 +352,15 @@ private class ServerState(
                     selected
                 }
             try {
+                if (decision.fault?.kind == ResponseFaultKind.DELAY_RESPONSE) {
+                    try {
+                        Thread.sleep(decision.fault.delayMillis)
+                    } catch (_: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        return
+                    }
+                }
+                if (decision.fault?.kind == ResponseFaultKind.DROP_CONNECTION) return
                 exchange.responseHeaders.set("Content-Type", decision.mediaType)
                 exchange.responseHeaders.set("Cache-Control", "no-store")
                 exchange.sendResponseHeaders(decision.status, decision.body.size.toLong())
@@ -348,6 +390,7 @@ private class ServerState(
             planned.body.toByteArray(StandardCharsets.UTF_8),
             planned.mediaType,
             index + 1,
+            planned.fault,
         )
     }
 }
@@ -358,6 +401,7 @@ private data class ResponseDecision(
     val body: ByteArray,
     val mediaType: String,
     val planIndex: Int? = null,
+    val fault: ResponseFault? = null,
 )
 
 internal data class BoundedBodyRead(
@@ -483,6 +527,7 @@ private const val MAX_EXCHANGES = 64
 private const val MAX_METHOD_CHARACTERS = 32
 private const val MAX_TARGET_CHARACTERS = 2048
 private const val MAX_BODY_BYTES = 1024L * 1024L
+private const val MAX_FAULT_DELAY_MILLIS = 5_000L
 private const val MAX_MEDIA_TYPE_CHARACTERS = 128
 private const val STOP_TIMEOUT_SECONDS = 5L
 private const val JSON_MEDIA_TYPE = "application/json"
