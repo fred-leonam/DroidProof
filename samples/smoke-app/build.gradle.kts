@@ -23,6 +23,14 @@ android {
         allWarningsAsErrors = true
     }
 
+    buildFeatures {
+        compose = true
+    }
+
+    composeOptions {
+        kotlinCompilerExtensionVersion = "1.5.15"
+    }
+
     defaultConfig {
         applicationId = "io.github.fredleonam.droidproof.smokeapp"
         minSdk = 23
@@ -49,4 +57,10 @@ android {
             if (localSigningConfigured) signingConfig = signingConfigs.getByName("localDemo")
         }
     }
+}
+
+dependencies {
+    implementation("androidx.activity:activity-compose:1.10.1")
+    implementation("androidx.compose.foundation:foundation:1.7.8")
+    implementation("androidx.compose.ui:ui:1.7.8")
 }

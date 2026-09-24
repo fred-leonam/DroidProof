@@ -10,4 +10,7 @@
     <string name="order_submitting">Creating order</string>
     <string name="order_created">Order %1$s created</string>
     <string name="order_failed">Order failed</string>
+    <string name="compose_action">Show Compose proof</string>
+    <string name="compose_status">Compose proof ready</string>
+    <string name="compose_status_description">DroidProof Compose semantics ready</string>
 </resources>

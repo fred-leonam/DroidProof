@@ -92,6 +92,31 @@ class CheckedInInteractiveScenariosTest {
         assertEquals(Sha256Calculator.calculate(failingPath), failingAccepted.sha256)
     }
 
+    @Test
+    fun `checked-in v6 scenarios exercise the observed Compose accessibility contract`() {
+        val passingPath = scenarioPath("compose-semantics-passing.json")
+        val failingPath = scenarioPath("compose-semantics-failing.json")
+        val passingAccepted = SmokeScenarioLoader.load(passingPath)
+        val failingAccepted = SmokeScenarioLoader.load(failingPath)
+        val passing = passingAccepted.scenario as SmokeScenarioV6
+        val failing = failingAccepted.scenario as SmokeScenarioV6
+
+        assertEquals(null, passing.backendPlan)
+        assertEquals(listOf(StepType.TAP_UI_NODE, StepType.ASSERT_COMPOSE_SEMANTICS), passing.steps.map { it.stepType })
+        assertEquals(TapUiNode("$EXPECTED_PACKAGE:id/compose_action"), passing.steps.first())
+        val passingAssertion = passing.steps.last() as AssertComposeSemantics
+        val failingAssertion = failing.steps.last() as AssertComposeSemantics
+        assertEquals("compose_status", passingAssertion.resourceId)
+        assertEquals("Compose proof ready", passingAssertion.text)
+        assertEquals("DroidProof Compose semantics ready", passingAssertion.contentDescription)
+        assertEquals(passingAssertion.copy(contentDescription = failingAssertion.contentDescription), failingAssertion)
+        assertNotEquals(passingAssertion.contentDescription, failingAssertion.contentDescription)
+        assertContentEquals(Files.readAllBytes(passingPath), passingAccepted.exactBytes)
+        assertContentEquals(Files.readAllBytes(failingPath), failingAccepted.exactBytes)
+        assertEquals(Sha256Calculator.calculate(passingPath), passingAccepted.sha256)
+        assertEquals(Sha256Calculator.calculate(failingPath), failingAccepted.sha256)
+    }
+
     private fun scenarioPath(name: String): Path =
         Path.of(requireNotNull(System.getProperty("droidproof.repositoryRoot")))
             .resolve("samples/smoke-app/scenarios")

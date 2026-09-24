@@ -41,29 +41,21 @@ class UiAssertionTest {
             source(
                 "compose.xml",
                 (
-                    """<hierarchy><node package="$PACKAGE" resource-id="$PACKAGE:id/order_status" """ +
+                    """<hierarchy><node package="$PACKAGE" resource-id="order_status" """ +
                         """text="Order created" content-desc="Order submission succeeded"/></hierarchy>"""
                 ).toByteArray(),
             )
 
-        assertTrue(
-            UiHierarchyParser().inspectComposeSemantics(
-                source,
-                PACKAGE,
-                "$PACKAGE:id/order_status",
-                "Order created",
-                "Order submission succeeded",
-            ).matched,
-        )
-        assertFalse(
-            UiHierarchyParser().inspectComposeSemantics(
-                source,
-                PACKAGE,
-                "$PACKAGE:id/order_status",
-                "Order created",
-                "Different description",
-            ).matched,
-        )
+        val parser = UiHierarchyParser()
+        assertTrue(parser.inspectComposeSemantics(source, PACKAGE, "order_status", "Order created", "Order submission succeeded").matched)
+        for ((expectedPackage, resourceId, text, description) in listOf(
+            listOf("other.package", "order_status", "Order created", "Order submission succeeded"),
+            listOf(PACKAGE, "other_status", "Order created", "Order submission succeeded"),
+            listOf(PACKAGE, "order_status", "Other text", "Order submission succeeded"),
+            listOf(PACKAGE, "order_status", "Order created", "Different description"),
+        )) {
+            assertFalse(parser.inspectComposeSemantics(source, expectedPackage, resourceId, text, description).matched)
+        }
     }
 
     @Test

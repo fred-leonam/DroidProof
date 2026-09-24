@@ -167,7 +167,7 @@ class SmokeScenarioTest {
             REQUEST_CONTRACT_SCENARIO.replace("\"schemaVersion\":4", "\"schemaVersion\":6")
                 .replace(
                     "\"type\":\"assertUiNode\",\"resourceId\":\"io.droidproof.smoke:id/status\",",
-                    "\"type\":\"assertComposeSemantics\",\"resourceId\":\"io.droidproof.smoke:id/order_status\"," +
+                    "\"type\":\"assertComposeSemantics\",\"resourceId\":\"order_status\"," +
                         "\"contentDescription\":\"Order submission succeeded\",",
                 )
         val source = directory.resolve("compose.json").also { Files.writeString(it, scenario) }
@@ -177,6 +177,7 @@ class SmokeScenarioTest {
         assertEquals(6, accepted.scenario.schemaVersion)
         assertEquals(AssertComposeSemantics::class, accepted.scenario.orderedSteps.last()::class)
         assertRejected(scenario.replace("Order submission succeeded", ""))
+        assertRejected(scenario.replace("\"order_status\"", "\"bad tag\""))
         assertRejected(scenario.replace("\"schemaVersion\":6", "\"schemaVersion\":5"))
     }
 

@@ -775,6 +775,17 @@ class SmokeCoordinatorTest {
         return request(name).copy(scenarioPath = scenario)
     }
 
+    private fun composeRequest(
+        name: String,
+        passing: Boolean,
+    ): SmokeRunRequest =
+        request(name).copy(
+            scenarioPath =
+                Path.of(requireNotNull(System.getProperty("droidproof.repositoryRoot")))
+                    .resolve("samples/smoke-app/scenarios")
+                    .resolve(if (passing) "compose-semantics-passing.json" else "compose-semantics-failing.json"),
+        )
+
     private fun coordinator(
         device: FakeSmokeDevice,
         capture: DeviceEvidenceCapture,
@@ -914,6 +925,54 @@ class SmokeCoordinatorTest {
         assertEquals(ExecutionStatus.COMPLETED, result.document?.status)
         assertEquals(ScenarioVerdict.FAILED, result.document?.verdict)
         assertEquals(StepStatus.ASSERTION_FAILED, result.document?.steps?.last()?.status)
+        assertTrue(result.bundleIntegrityValid)
+    }
+
+    @Test
+    fun `Compose semantics match produces a passed verdict and integrity-bound hierarchy`() {
+        val device =
+            FakeSmokeDevice().apply {
+                dumps += DumpResponse(COMPOSE_ACTION_XML)
+                dumps += DumpResponse(COMPOSE_SEMANTICS_XML)
+            }
+
+        val result = coordinator(device, completeCapture()).run(composeRequest("compose-pass", passing = true))
+        val bundle = requireNotNull(result.output)
+        val hierarchyPath = "ui/steps/002-compose-semantics.xml"
+
+        assertTrue(result.isSuccessful)
+        assertEquals(ScenarioVerdict.PASSED, result.document?.verdict)
+        assertEquals(
+            listOf(StepType.TAP_UI_NODE, StepType.ASSERT_COMPOSE_SEMANTICS),
+            result.document?.steps?.map { it.type },
+        )
+        assertEquals("DroidProof Compose semantics ready", result.document?.assertion?.expectedContentDescription)
+        assertEquals(hierarchyPath, result.document?.assertion?.hierarchyPath?.value)
+        assertContentEquals(COMPOSE_SEMANTICS_XML, Files.readAllBytes(bundle.resolve(hierarchyPath)))
+        assertTrue(EvidenceBundleVerifier().verify(bundle).isValid)
+    }
+
+    @Test
+    fun `Compose semantics nonmatch is failed and retains the last observed hierarchy`() {
+        val device =
+            FakeSmokeDevice().apply {
+                dumps += DumpResponse(COMPOSE_ACTION_XML)
+                repeat(60) { dumps += DumpResponse(COMPOSE_SEMANTICS_XML) }
+            }
+
+        val result = coordinator(device, completeCapture()).run(composeRequest("compose-fail", passing = false))
+        val bundle = requireNotNull(result.output)
+        val hierarchyPath = "ui/steps/002-compose-semantics.xml"
+        val manifest = evidenceJson.decodeFromString<EvidenceBundleManifestV3>(Files.readString(bundle.resolve("manifest.json")))
+        val descriptor = manifest.evidenceFiles.single { it.path.value == hierarchyPath }
+
+        assertEquals(ExecutionStatus.COMPLETED, result.document?.status)
+        assertEquals(ScenarioVerdict.FAILED, result.document?.verdict)
+        assertEquals(StepStatus.ASSERTION_FAILED, result.document?.steps?.last()?.status)
+        assertEquals(AssertionOutcome.NOT_MATCHED, result.document?.assertion?.outcome)
+        assertEquals(EvidenceFileRole.SEMANTICS, descriptor.role)
+        assertContentEquals(COMPOSE_SEMANTICS_XML, Files.readAllBytes(bundle.resolve(hierarchyPath)))
+        assertEquals(Sha256Calculator.calculate(bundle.resolve(hierarchyPath)), descriptor.sha256)
         assertTrue(result.bundleIntegrityValid)
     }
 
@@ -1147,3 +1206,17 @@ private val INPUT_XML =
     TAP_XML.toString(
         Charsets.UTF_8,
     ).replace(":id/action", ":id/name").replace("[10,20][30,60]", "[50,60][70,100]").toByteArray()
+
+private val COMPOSE_ACTION_XML =
+    (
+        """<hierarchy><node package="io.github.fredleonam.droidproof.smokeapp" """ +
+            """resource-id="io.github.fredleonam.droidproof.smokeapp:id/compose_action" """ +
+            """bounds="[303,1355][777,1481]"/></hierarchy>"""
+    ).toByteArray()
+
+private val COMPOSE_SEMANTICS_XML =
+    (
+        """<hierarchy><node package="io.github.fredleonam.droidproof.smokeapp" resource-id="compose_status" """ +
+            """class="android.widget.TextView" text="Compose proof ready" """ +
+            """content-desc="DroidProof Compose semantics ready" bounds="[366,1481][714,1524]"/></hierarchy>"""
+    ).toByteArray()

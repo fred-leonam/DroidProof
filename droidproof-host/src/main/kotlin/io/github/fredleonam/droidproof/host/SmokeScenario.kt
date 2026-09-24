@@ -164,7 +164,7 @@ data class AssertUiNode(
 /**
  * An assertion over the accessibility representation that Compose exposes to UI Automator.
  * Configure the application's semantics owner with testTagsAsResourceId so [resourceId] is
- * emitted as `$expectedPackage:id/<testTag>` in the dumped hierarchy.
+ * emitted as the bare test tag in the dumped hierarchy. The package is matched separately.
  */
 @Serializable
 @SerialName("assertComposeSemantics")
@@ -176,6 +176,9 @@ data class AssertComposeSemantics(
     val pollIntervalMillis: Long,
 ) : ScenarioStep() {
     init {
+        require(COMPOSE_TEST_TAG.matches(resourceId)) {
+            "Compose semantics resource ID must be a safe test tag."
+        }
         validateAssertion(text, deadlineMillis, pollIntervalMillis)
         require(contentDescription.isNotEmpty() && contentDescription.length <= MAX_TEXT_LENGTH) {
             "Expected Compose content description must contain 1 to $MAX_TEXT_LENGTH characters."
@@ -268,15 +271,17 @@ data class SmokeScenarioV6(
     override val scenarioId: ScenarioId,
     override val expectedPackage: String,
     override val launchComponent: String,
-    override val backendPlan: ScenarioBackendPlanV4,
+    override val backendPlan: ScenarioBackendPlanV4? = null,
     val steps: List<ScenarioStep>,
 ) : ScenarioDefinition {
     override val orderedSteps: List<ScenarioStep> get() = steps
 
     init {
         require(schemaVersion == 6) { "Unsupported scenario schema version." }
-        validateBackendPlan(backendPlan, 6)
-        validateExpectedRequestSize(backendPlan)
+        backendPlan?.let {
+            validateBackendPlan(it, 6)
+            validateExpectedRequestSize(it)
+        }
         validateOrderedScenario(expectedPackage, launchComponent, steps, allowComposeSemantics = true)
     }
 }
@@ -409,7 +414,15 @@ private fun validateOrderedScenario(
     require(allowComposeSemantics || steps.none { it is AssertComposeSemantics }) {
         "Compose semantics assertions require scenario schema version 6."
     }
-    steps.forEach { validateResource(expectedPackage, it.resourceId) }
+    steps.forEach { step ->
+        if (step is AssertComposeSemantics) {
+            require(COMPOSE_TEST_TAG.matches(step.resourceId)) {
+                "Compose semantics resource ID must be a safe test tag."
+            }
+        } else {
+            validateResource(expectedPackage, step.resourceId)
+        }
+    }
 }
 
 private fun validateExpectedRequestSize(plan: ScenarioBackendPlanV4) {
@@ -427,6 +440,7 @@ private const val EXTRA_EXCHANGE_ALLOWANCE = 8
 private val PACKAGE_NAME = Regex("[a-zA-Z][a-zA-Z0-9_]*(?:\\.[a-zA-Z][a-zA-Z0-9_]*)+")
 private val CLASS_NAME = Regex("[a-zA-Z][a-zA-Z0-9_]*(?:\\.[a-zA-Z][a-zA-Z0-9_]*)+")
 private val RESOURCE_ID = Regex("[a-zA-Z][a-zA-Z0-9_.]*:id/[a-zA-Z][a-zA-Z0-9_]*")
+private val COMPOSE_TEST_TAG = Regex("[A-Za-z][A-Za-z0-9_.-]{0,127}")
 private val scenarioJson =
     Json {
         ignoreUnknownKeys = false

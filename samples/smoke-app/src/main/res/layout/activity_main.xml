@@ -32,4 +32,14 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:text="@string/order_action" />
+    <Button
+        android:id="@+id/compose_action"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/compose_action" />
+    <androidx.compose.ui.platform.ComposeView
+        android:id="@+id/compose_surface"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:visibility="gone" />
 </LinearLayout>
