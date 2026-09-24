@@ -38,6 +38,27 @@ class UiAssertionRunner(
 
     fun await(
         expectedPackage: String,
+        step: AssertComposeSemantics,
+        serial: String,
+        workDirectory: Path,
+        hierarchyPath: BundleRelativePath,
+        operationTimeoutMillis: (Long) -> Long,
+    ): UiAssertionAttempt =
+        await(
+            AssertionParameters(
+                expectedPackage,
+                UiExpectation(step.resourceId, step.text, step.contentDescription),
+                step.deadlineMillis,
+                step.pollIntervalMillis,
+                hierarchyPath,
+            ),
+            serial,
+            workDirectory,
+            operationTimeoutMillis,
+        )
+
+    fun await(
+        expectedPackage: String,
         step: AssertUiNode,
         serial: String,
         workDirectory: Path,
@@ -91,7 +112,20 @@ class UiAssertionRunner(
 
             val inspected =
                 try {
-                    parser.inspect(local, scenario.expectedPackage, scenario.expectedUi.resourceId, scenario.expectedUi.text)
+                    scenario.expectedUi.contentDescription?.let {
+                        parser.inspectComposeSemantics(
+                            local,
+                            scenario.expectedPackage,
+                            scenario.expectedUi.resourceId,
+                            scenario.expectedUi.text,
+                            it,
+                        )
+                    } ?: parser.inspect(
+                        local,
+                        scenario.expectedPackage,
+                        scenario.expectedUi.resourceId,
+                        scenario.expectedUi.text,
+                    )
                 } catch (error: HierarchyValidationException) {
                     Files.deleteIfExists(local)
                     return error(scenario, successfulObservations, lastValid, error.message ?: "UI hierarchy was invalid.")
@@ -106,6 +140,7 @@ class UiAssertionRunner(
                         scenario.expectedPackage,
                         scenario.expectedUi.resourceId,
                         scenario.expectedUi.text,
+                        scenario.expectedUi.contentDescription,
                         scenario.hierarchyPath,
                         successfulObservations,
                         inspected.detail,
@@ -142,6 +177,7 @@ class UiAssertionRunner(
                     scenario.expectedPackage,
                     scenario.expectedUi.resourceId,
                     scenario.expectedUi.text,
+                    scenario.expectedUi.contentDescription,
                     scenario.hierarchyPath,
                     observations,
                     "The deadline expired after valid hierarchy observations without a matching node.",
@@ -171,6 +207,7 @@ class UiAssertionRunner(
                 scenario.expectedPackage,
                 scenario.expectedUi.resourceId,
                 scenario.expectedUi.text,
+                scenario.expectedUi.contentDescription,
                 null,
                 observations,
                 detail,

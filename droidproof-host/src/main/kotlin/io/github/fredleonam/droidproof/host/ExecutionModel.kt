@@ -61,6 +61,7 @@ data class AssertionDocument(
     val expectedPackage: String,
     val expectedResourceId: String,
     val expectedText: String,
+    val expectedContentDescription: String? = null,
     val hierarchyPath: BundleRelativePath? = null,
     val successfulHierarchyObservations: Int = 0,
     val detail: String,
@@ -108,6 +109,9 @@ enum class StepType(val timelineEventType: String, val hierarchySuffix: String, 
 
     @kotlinx.serialization.SerialName("assertUiNode")
     ASSERT_UI_NODE("scenario.step.assert", "assert", 2),
+
+    @kotlinx.serialization.SerialName("assertComposeSemantics")
+    ASSERT_COMPOSE_SEMANTICS("scenario.step.assert_compose_semantics", "compose-semantics", 2),
 }
 
 @Serializable

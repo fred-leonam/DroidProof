@@ -34,13 +34,35 @@ class UiHierarchyParser(
         expectedResourceId: String,
         expectedText: String,
     ): HierarchyMatchResult {
-        val handler = MatchingNodeHandler(expectedPackage, expectedResourceId, expectedText, maxNodes)
+        return inspect(expectedPackage, expectedResourceId, expectedText, null, path)
+    }
+
+    fun inspectComposeSemantics(
+        path: Path,
+        expectedPackage: String,
+        expectedResourceId: String,
+        expectedText: String,
+        expectedContentDescription: String,
+    ): HierarchyMatchResult = inspect(expectedPackage, expectedResourceId, expectedText, expectedContentDescription, path)
+
+    private fun inspect(
+        expectedPackage: String,
+        expectedResourceId: String,
+        expectedText: String,
+        expectedContentDescription: String?,
+        path: Path,
+    ): HierarchyMatchResult {
+        val handler = MatchingNodeHandler(expectedPackage, expectedResourceId, expectedText, expectedContentDescription, maxNodes)
         parse(path, handler)
         val detail =
             if (handler.matched) {
-                "One accessibility node matched package, resource ID and exact text."
+                if (expectedContentDescription == null) {
+                    "One accessibility node matched package, resource ID and exact text."
+                } else {
+                    "One Compose semantics node matched package, test-tag resource ID, exact text and content description."
+                }
             } else {
-                "No single accessibility node matched all three expected attributes."
+                "No single accessibility node matched all expected attributes."
             }
         return HierarchyMatchResult(handler.matched, handler.nodeCount, detail)
     }
@@ -59,7 +81,7 @@ class UiHierarchyParser(
         if (!resourceId.startsWith("$expectedPackage:id/")) {
             throw HierarchyValidationException("Tap resource ID does not belong to the expected package.")
         }
-        val handler = MatchingNodeHandler(expectedPackage, resourceId, null, maxNodes)
+        val handler = MatchingNodeHandler(expectedPackage, resourceId, null, null, maxNodes)
         parse(path, handler)
         return try {
             TapResolution(coordinates(handler))
@@ -120,6 +142,7 @@ private class MatchingNodeHandler(
     private val expectedPackage: String,
     private val expectedResourceId: String,
     private val expectedText: String?,
+    private val expectedContentDescription: String?,
     private val maxNodes: Int,
 ) : DefaultHandler() {
     val matched: Boolean get() = matchCount > 0
@@ -141,7 +164,8 @@ private class MatchingNodeHandler(
         if (nodeCount > maxNodes) throw SAXException("UI hierarchy node limit exceeded.")
         if (attributes.getValue("package") == expectedPackage &&
             attributes.getValue("resource-id") == expectedResourceId &&
-            (expectedText == null || attributes.getValue("text") == expectedText)
+            (expectedText == null || attributes.getValue("text") == expectedText) &&
+            (expectedContentDescription == null || attributes.getValue("content-desc") == expectedContentDescription)
         ) {
             matchCount++
             bounds = attributes.getValue("bounds")

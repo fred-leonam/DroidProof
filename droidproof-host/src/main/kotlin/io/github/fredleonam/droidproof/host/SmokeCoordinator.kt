@@ -126,7 +126,7 @@ class SmokeCoordinator(
                 accepted = AcceptedInputs(scenario, artifact, environment)
                 lease = leaseProvider.acquire(request.deviceSerial)
                 val overallBudget =
-                    scenario.scenario.orderedSteps.filterIsInstance<AssertUiNode>().sumOf { it.deadlineMillis } +
+                    scenario.scenario.orderedSteps.sumOf { it.assertionDeadlineMillisOrZero } +
                         scenario.scenario.orderedSteps.sumOf { it.stepType.deviceOperationCount } * request.commandTimeoutMillis +
                         (scenario.scenario.orderedSteps.size + FIXED_MUTATION_CHECKPOINTS) *
                         mutationCheckpointOperationCount(environment != null) *
@@ -669,6 +669,23 @@ class SmokeCoordinator(
                             }
                             if (attempt.error != null) throw RunAbort(attempt.error, attempt.cancelled)
                         }
+                        is AssertComposeSemantics -> {
+                            val attempt =
+                                assertionRunner.await(
+                                    scenario.expectedPackage,
+                                    step,
+                                    request.deviceSerial,
+                                    stepDirectory,
+                                    path,
+                                ) { remaining -> minOf(remaining, operationTimeout(request, state)) }
+                            state.assertionAttempt = attempt
+                            document = attempt.document
+                            attempt.hierarchySource?.let {
+                                state.stepFiles += EvidenceFileInput(it, path, "application/xml", EvidenceFileRole.SEMANTICS)
+                                retained = path
+                            }
+                            if (attempt.error != null) throw RunAbort(attempt.error, attempt.cancelled)
+                        }
                     }
                     operationTimeout(request, state)
                     val status =
@@ -848,8 +865,9 @@ class SmokeCoordinator(
                 ?: AssertionDocument(
                     AssertionOutcome.NOT_EVALUATED,
                     accepted.scenario.scenario.expectedPackage,
-                    accepted.scenario.scenario.orderedSteps.filterIsInstance<AssertUiNode>().last().resourceId,
-                    accepted.scenario.scenario.orderedSteps.filterIsInstance<AssertUiNode>().last().text,
+                    accepted.scenario.scenario.orderedSteps.last().resourceId,
+                    (accepted.scenario.scenario.orderedSteps.last() as? AssertUiNode)?.text
+                        ?: (accepted.scenario.scenario.orderedSteps.last() as AssertComposeSemantics).text,
                     detail = state.primaryError ?: "Assertion was not reached.",
                 )
         val resultDocument =

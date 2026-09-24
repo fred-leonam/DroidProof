@@ -27,6 +27,7 @@ import java.nio.file.Path
 data class UiExpectation(
     val resourceId: String,
     val text: String,
+    val contentDescription: String? = null,
 )
 
 interface ScenarioDefinition {
@@ -113,6 +114,15 @@ internal val ScenarioStep.stepType: StepType
             is TypeTextUiNode -> StepType.TYPE_TEXT_UI_NODE
             is TapUiNode -> StepType.TAP_UI_NODE
             is AssertUiNode -> StepType.ASSERT_UI_NODE
+            is AssertComposeSemantics -> StepType.ASSERT_COMPOSE_SEMANTICS
+        }
+
+internal val ScenarioStep.assertionDeadlineMillisOrZero: Long
+    get() =
+        when (this) {
+            is AssertUiNode -> deadlineMillis
+            is AssertComposeSemantics -> deadlineMillis
+            else -> 0
         }
 
 @Serializable
@@ -148,6 +158,28 @@ data class AssertUiNode(
 ) : ScenarioStep() {
     init {
         validateAssertion(text, deadlineMillis, pollIntervalMillis)
+    }
+}
+
+/**
+ * An assertion over the accessibility representation that Compose exposes to UI Automator.
+ * Configure the application's semantics owner with testTagsAsResourceId so [resourceId] is
+ * emitted as `$expectedPackage:id/<testTag>` in the dumped hierarchy.
+ */
+@Serializable
+@SerialName("assertComposeSemantics")
+data class AssertComposeSemantics(
+    override val resourceId: String,
+    val text: String,
+    val contentDescription: String,
+    val deadlineMillis: Long,
+    val pollIntervalMillis: Long,
+) : ScenarioStep() {
+    init {
+        validateAssertion(text, deadlineMillis, pollIntervalMillis)
+        require(contentDescription.isNotEmpty() && contentDescription.length <= MAX_TEXT_LENGTH) {
+            "Expected Compose content description must contain 1 to $MAX_TEXT_LENGTH characters."
+        }
     }
 }
 
@@ -226,6 +258,26 @@ data class SmokeScenarioV5(
         validateBackendPlan(backendPlan, 5)
         validateExpectedRequestSize(backendPlan)
         validateOrderedScenario(expectedPackage, launchComponent, steps)
+    }
+}
+
+/** Schema v6 adds bounded Compose-semantics assertions through UI Automator. */
+@Serializable
+data class SmokeScenarioV6(
+    override val schemaVersion: Int,
+    override val scenarioId: ScenarioId,
+    override val expectedPackage: String,
+    override val launchComponent: String,
+    override val backendPlan: ScenarioBackendPlanV4,
+    val steps: List<ScenarioStep>,
+) : ScenarioDefinition {
+    override val orderedSteps: List<ScenarioStep> get() = steps
+
+    init {
+        require(schemaVersion == 6) { "Unsupported scenario schema version." }
+        validateBackendPlan(backendPlan, 6)
+        validateExpectedRequestSize(backendPlan)
+        validateOrderedScenario(expectedPackage, launchComponent, steps, allowComposeSemantics = true)
     }
 }
 
@@ -313,6 +365,7 @@ object SmokeScenarioLoader {
                 3 -> scenarioJson.decodeFromString<SmokeScenarioV3>(text)
                 4 -> scenarioJson.decodeFromString<SmokeScenarioV4>(text)
                 5 -> scenarioJson.decodeFromString<SmokeScenarioV5>(text)
+                6 -> scenarioJson.decodeFromString<SmokeScenarioV6>(text)
                 else -> error("Unsupported scenario schema version: $version.")
             }
         return AcceptedScenario(scenario, bytes, Sha256Calculator.calculate(ByteArrayInputStream(bytes)))
@@ -348,10 +401,14 @@ private fun validateOrderedScenario(
     expectedPackage: String,
     launchComponent: String,
     steps: List<ScenarioStep>,
+    allowComposeSemantics: Boolean = false,
 ) {
     validateScope(expectedPackage, launchComponent)
     require(steps.size in 1..100) { "Scenario must contain 1 to 100 steps." }
-    require(steps.last() is AssertUiNode) { "Scenario must end with an assertion." }
+    require(steps.last() is AssertUiNode || steps.last() is AssertComposeSemantics) { "Scenario must end with an assertion." }
+    require(allowComposeSemantics || steps.none { it is AssertComposeSemantics }) {
+        "Compose semantics assertions require scenario schema version 6."
+    }
     steps.forEach { validateResource(expectedPackage, it.resourceId) }
 }
 
