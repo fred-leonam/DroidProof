@@ -374,7 +374,7 @@ Recovery only writes when a fresh API level, build fingerprint, and boot identif
 | --- | --- |
 | Evidence | Schema v1/v2/v3 reader and verifier; v3 execution bundles; SHA-256 inventory |
 | Android capture | Bounded screenshots, allowlisted metadata, optional PID-filtered logcat |
-| UI execution | Narrow View resource-ID text input, tap, and exact-text assertion |
+| UI execution | Narrow View resource-ID input/tap/assertion and bounded Compose accessibility-semantics assertions |
 | Network | One controlled loopback `POST /orders` endpoint with ordered response, request-contract, and bounded v5 delay/connection-close faults |
 | Target lifecycle | External device, existing AVD, or narrowly owned legacy-SDK provisioned AVD |
 | Reports | Deterministic, offline static HTML generated only from verified evidence |
@@ -384,17 +384,17 @@ Not implemented: arbitrary endpoint scripting, TLS MITM or general traffic inter
 
 ### Compose semantics assertions
 
-Schema v6 supports a final `assertComposeSemantics` step. DroidProof reads the Compose accessibility node through `uiautomator dump` and requires one node to match the app package, a Compose test-tag resource ID, exact text, and exact content description. Configure the Compose semantics owner with `testTagsAsResourceId = true`, then declare the tag as `your.package:id/your_tag`:
+Schema v6 supports a final `assertComposeSemantics` step. DroidProof reads the Compose accessibility node through `uiautomator dump` and requires one node to match the app package, a Compose test tag, exact text, and exact content description. Configure the Compose semantics owner with `testTagsAsResourceId = true`, then declare the bare test tag (the package is matched separately):
 
 ```json
-{"type":"assertComposeSemantics","resourceId":"io.example.app:id/order_status","text":"Order created","contentDescription":"Order submission succeeded","deadlineMillis":1000,"pollIntervalMillis":100}
+{"type":"assertComposeSemantics","resourceId":"order_status","text":"Order created","contentDescription":"Order submission succeeded","deadlineMillis":1000,"pollIntervalMillis":100}
 ```
 
 This is an accessibility-semantics observation. It does not execute Espresso assertions or inspect Compose's in-process semantics tree.
 
 ## Contracts and safety boundaries
 
-- Scenario schemas v1–v5 remain readable. V4 adds strict matching for the single controlled JSON request; V5 adds bounded delay and connection-close faults for that same endpoint.
+- Scenario schemas v1–v5 remain readable. V4 adds strict matching for the single controlled JSON request; V5 adds bounded delay and connection-close faults for that same endpoint; V6 adds Compose accessibility-semantics assertions and permits scenarios without a backend plan.
 - Environment contracts, environment evaluations, capability observations, continuity observations, transaction-mutation observations, evidence, and authentication each have separate versioned schemas.
 - A matching environment or checkpoint is a sequential point observation. It does not prove stability between checks, actor identity, exclusive ownership, or the absence of unrelated changes.
 - The mock server proves only what it observed on its controlled endpoint. It does not prove that no other network traffic occurred.

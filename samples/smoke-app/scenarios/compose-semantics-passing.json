@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 6,
+  "scenarioId": "smoke-compose-semantics-passing",
+  "expectedPackage": "io.github.fredleonam.droidproof.smokeapp",
+  "launchComponent": "io.github.fredleonam.droidproof.smokeapp/io.github.fredleonam.droidproof.smokeapp.MainActivity",
+  "steps": [
+    {
+      "type": "tapUiNode",
+      "resourceId": "io.github.fredleonam.droidproof.smokeapp:id/compose_action"
+    },
+    {
+      "type": "assertComposeSemantics",
+      "resourceId": "compose_status",
+      "text": "Compose proof ready",
+      "contentDescription": "DroidProof Compose semantics ready",
+      "deadlineMillis": 15000,
+      "pollIntervalMillis": 250
+    }
+  ]
+}

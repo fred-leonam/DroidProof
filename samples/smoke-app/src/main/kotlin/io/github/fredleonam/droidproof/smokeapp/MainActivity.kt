@@ -1,11 +1,19 @@
 package io.github.fredleonam.droidproof.smokeapp
 
-import android.app.Activity
 import android.content.Intent
 import android.os.Bundle
 import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
+import androidx.activity.ComponentActivity
+import androidx.compose.foundation.text.BasicText
+import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.testTagsAsResourceId
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
@@ -13,12 +21,27 @@ import java.net.URL
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
-class MainActivity : Activity() {
+class MainActivity : ComponentActivity() {
     private val networkExecutor: ExecutorService = Executors.newSingleThreadExecutor()
 
+    @OptIn(ExperimentalComposeUiApi::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        val composeSurface = findViewById<ComposeView>(R.id.compose_surface)
+        composeSurface.setContent {
+            BasicText(
+                text = getString(R.string.compose_status),
+                modifier =
+                    Modifier
+                        .semantics { testTagsAsResourceId = true }
+                        .testTag(COMPOSE_STATUS_TAG)
+                        .semantics { contentDescription = getString(R.string.compose_status_description) },
+            )
+        }
+        findViewById<Button>(R.id.compose_action).setOnClickListener {
+            composeSurface.visibility = android.view.View.VISIBLE
+        }
         findViewById<Button>(R.id.action).setOnClickListener {
             val name = findViewById<EditText>(R.id.name).text.toString()
             findViewById<TextView>(R.id.status).text =
@@ -110,5 +133,6 @@ class MainActivity : Activity() {
         const val NETWORK_TIMEOUT_MILLIS = 3000
         const val MAX_BODY_BYTES = 4096
         val SAFE_ORDER_ID = Regex("[A-Za-z0-9-]{1,64}")
+        const val COMPOSE_STATUS_TAG = "compose_status"
     }
 }

@@ -868,6 +868,8 @@ class SmokeCoordinator(
                     accepted.scenario.scenario.orderedSteps.last().resourceId,
                     (accepted.scenario.scenario.orderedSteps.last() as? AssertUiNode)?.text
                         ?: (accepted.scenario.scenario.orderedSteps.last() as AssertComposeSemantics).text,
+                    expectedContentDescription =
+                        (accepted.scenario.scenario.orderedSteps.last() as? AssertComposeSemantics)?.contentDescription,
                     detail = state.primaryError ?: "Assertion was not reached.",
                 )
         val resultDocument =
