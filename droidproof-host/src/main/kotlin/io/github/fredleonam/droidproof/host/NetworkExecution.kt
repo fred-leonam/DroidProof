@@ -188,14 +188,16 @@ internal class ActiveNetworkSession(
                     observed.responseStatus == expected.status &&
                     observed.injectedFault == expected.fault &&
                     observed.responseDelivered != expectedDrop &&
-                    (if (expectedDrop) {
-                        observed.responseBody.capturedByteSize == 0L && !observed.responseBody.complete
-                    } else {
-                        observed.responseBody.capturedByteSize == expectedResponse.size.toLong() &&
-                            observed.responseBody.sha256 ==
-                            Sha256Calculator.calculate(ByteArrayInputStream(expectedResponse)).value &&
-                            observed.responseBody.complete
-                    }) &&
+                    (
+                        if (expectedDrop) {
+                            observed.responseBody.capturedByteSize == 0L && !observed.responseBody.complete
+                        } else {
+                            observed.responseBody.capturedByteSize == expectedResponse.size.toLong() &&
+                                observed.responseBody.sha256 ==
+                                Sha256Calculator.calculate(ByteArrayInputStream(expectedResponse)).value &&
+                                observed.responseBody.complete
+                        }
+                    ) &&
                     observed.requestBody.complete &&
                     (
                         expectedRequest == null ||

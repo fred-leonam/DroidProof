@@ -380,7 +380,17 @@ Recovery only writes when a fresh API level, build fingerprint, and boot identif
 | Reports | Deterministic, offline static HTML generated only from verified evidence |
 | Authentication | Optional JDK 17 Ed25519 signature with caller-supplied external public key |
 
-Not implemented: arbitrary endpoint scripting, TLS MITM or general traffic interception, Compose/Espresso probes, a general-purpose scenario DSL or published Gradle plugin, PKI/revocation/timestamping, KMS/HSM integration, and remote attestation. The sample supports only explicit loopback TLS termination; it does not install a CA or redirect traffic.
+Not implemented: arbitrary endpoint scripting, TLS MITM or general traffic interception, Espresso probes, a general-purpose scenario DSL or published Gradle plugin, PKI/revocation/timestamping, KMS/HSM integration, and remote attestation. The sample supports only explicit loopback TLS termination; it does not install a CA or redirect traffic.
+
+### Compose semantics assertions
+
+Schema v6 supports a final `assertComposeSemantics` step. DroidProof reads the Compose accessibility node through `uiautomator dump` and requires one node to match the app package, a Compose test-tag resource ID, exact text, and exact content description. Configure the Compose semantics owner with `testTagsAsResourceId = true`, then declare the tag as `your.package:id/your_tag`:
+
+```json
+{"type":"assertComposeSemantics","resourceId":"io.example.app:id/order_status","text":"Order created","contentDescription":"Order submission succeeded","deadlineMillis":1000,"pollIntervalMillis":100}
+```
+
+This is an accessibility-semantics observation. It does not execute Espresso assertions or inspect Compose's in-process semantics tree.
 
 ## Contracts and safety boundaries
 

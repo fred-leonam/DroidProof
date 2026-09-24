@@ -36,6 +36,37 @@ class UiAssertionTest {
     }
 
     @Test
+    fun `matches Compose semantics on one accessibility node`() {
+        val source =
+            source(
+                "compose.xml",
+                (
+                    """<hierarchy><node package="$PACKAGE" resource-id="$PACKAGE:id/order_status" """ +
+                        """text="Order created" content-desc="Order submission succeeded"/></hierarchy>"""
+                ).toByteArray(),
+            )
+
+        assertTrue(
+            UiHierarchyParser().inspectComposeSemantics(
+                source,
+                PACKAGE,
+                "$PACKAGE:id/order_status",
+                "Order created",
+                "Order submission succeeded",
+            ).matched,
+        )
+        assertFalse(
+            UiHierarchyParser().inspectComposeSemantics(
+                source,
+                PACKAGE,
+                "$PACKAGE:id/order_status",
+                "Order created",
+                "Different description",
+            ).matched,
+        )
+    }
+
+    @Test
     fun `rejects malformed XML DTD and bounded input`() {
         val parser = UiHierarchyParser(maxBytes = 256)
 

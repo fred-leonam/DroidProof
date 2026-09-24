@@ -135,7 +135,6 @@ class SmokeScenarioTest {
             REQUEST_CONTRACT_SCENARIO.replace("{\\\"customer\\\":\\\"DroidProof42\\\"}", ""),
             REQUEST_CONTRACT_SCENARIO.replace("\"expectedRequest\":{", "\"expectedRequest\":{\"unknown\":true,"),
             REQUEST_CONTRACT_SCENARIO.replace("\"requestBodyLimitBytes\":4096", "\"requestBodyLimitBytes\":1"),
-            REQUEST_CONTRACT_SCENARIO.replace("\"schemaVersion\":4", "\"schemaVersion\":5"),
             NETWORK_SCENARIO.replace("\"schemaVersion\":3", "\"schemaVersion\":4"),
             REQUEST_CONTRACT_SCENARIO.replace("\"schemaVersion\":4", "\"schemaVersion\":3"),
         ).forEachIndexed { index, invalid -> assertRejected(invalid, "request contract invalid case $index") }
@@ -160,6 +159,25 @@ class SmokeScenarioTest {
         assertRejected(TEXT_SCENARIO.replace("\"type\":\"typeTextUiNode\"", "\"type\":\"typeTextUiNode\",\"clear\":true"))
         assertRejected(TEXT_SCENARIO.replace("io.droidproof.smoke:id/name", "other.package:id/name"))
         assertRejected(TEXT_SCENARIO.replace("io.droidproof.smoke:id/name", "name"))
+    }
+
+    @Test
+    fun `v6 accepts a bounded Compose semantics assertion`() {
+        val scenario =
+            REQUEST_CONTRACT_SCENARIO.replace("\"schemaVersion\":4", "\"schemaVersion\":6")
+                .replace(
+                    "\"type\":\"assertUiNode\",\"resourceId\":\"io.droidproof.smoke:id/status\",",
+                    "\"type\":\"assertComposeSemantics\",\"resourceId\":\"io.droidproof.smoke:id/order_status\"," +
+                        "\"contentDescription\":\"Order submission succeeded\",",
+                )
+        val source = directory.resolve("compose.json").also { Files.writeString(it, scenario) }
+
+        val accepted = SmokeScenarioLoader.load(source)
+
+        assertEquals(6, accepted.scenario.schemaVersion)
+        assertEquals(AssertComposeSemantics::class, accepted.scenario.orderedSteps.last()::class)
+        assertRejected(scenario.replace("Order submission succeeded", ""))
+        assertRejected(scenario.replace("\"schemaVersion\":6", "\"schemaVersion\":5"))
     }
 
     private fun assertRejected(
