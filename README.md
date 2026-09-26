@@ -59,6 +59,7 @@ Pick the smallest path that answers your need.
 | Inspect a sample evidence bundle | `./gradlew :droidproof-evidence:generateSampleEvidence` | No |
 | Capture an already-authorized device/emulator | `./gradlew :droidproof-device:captureDeviceEvidence -Pdroidproof.deviceSerial=emulator-5554` | Yes |
 | Run the full sample order scenario | Follow [Run the sample scenario](#run-the-sample-scenario) | Yes |
+| Use DroidProof outside this checkout | Use the [CLI or Gradle plugin](#use-droidproof-in-another-project) | For scenario runs |
 | Turn a saved bundle into a report | Follow [Read a bundle](#read-a-bundle) | No |
 
 ### 1. Verify the project
@@ -311,6 +312,91 @@ Without `reportPath`, the default is `droidproof-report/build/reports/droidproof
 
 The static report has inline CSS, no JavaScript, and no external resources. It verifies the bundle before displaying it. A missing or tampered inventoried file produces a limited diagnostic report and omits unverified execution, environment, network, and preview data.
 
+## Use DroidProof in another project
+
+### Command-line interface
+
+Build an installable distribution, then invoke its `droidproof` launcher from any directory:
+
+```bash
+./gradlew :droidproof-cli:installDist
+
+droidproof-cli/build/install/droidproof/bin/droidproof validate-scenario \
+  --scenario /absolute/path/to/scenario.json
+
+droidproof-cli/build/install/droidproof/bin/droidproof run \
+  --apk /absolute/path/to/app.apk \
+  --scenario /absolute/path/to/scenario.json \
+  --device-serial emulator-5554 \
+  --adb /absolute/path/to/adb \
+  --output /absolute/path/to/evidence
+```
+
+The CLI also provides `report`, `recover`, and `probe-android-cli`; use `droidproof COMMAND --help` for each command's arguments. Invalid usage exits with status 2, while an unsuccessful operation exits with status 1.
+
+### Published Gradle plugin
+
+The plugin ID is `io.github.fredleonam.droidproof`. During local development, publish it and its runtime modules to Maven Local:
+
+```bash
+./gradlew publishToMavenLocal
+```
+
+Apply the plugin in a consumer build and configure its typed extension:
+
+```kotlin
+// settings.gradle.kts, for a locally published development build
+pluginManagement {
+    repositories {
+        mavenLocal()
+        gradlePluginPortal()
+    }
+}
+```
+
+```kotlin
+// build.gradle.kts
+plugins {
+    id("io.github.fredleonam.droidproof") version "0.1.0-SNAPSHOT"
+}
+
+droidProof {
+    apk.set(layout.projectDirectory.file("build/outputs/apk/release/app-release.apk"))
+    scenario.set(layout.projectDirectory.file("scenarios/release-proof.json"))
+    deviceSerial.set("emulator-5554")
+    adbPath.set(file("/absolute/path/to/adb"))
+}
+```
+
+`droidProofRun` executes the configured scenario, `droidProofValidateScenario` validates it without Android, and `droidProofReport` verifies `bundle` and writes `report`. The plugin artifact is `io.github.fredleonam.droidproof:droidproof-gradle-plugin`.
+
+### Kotlin scenario DSL
+
+The `droidproof-scenario-dsl` artifact creates validated schema-v6 JSON and supports all current UI, Compose, loopback transport, response, and bounded-fault declarations:
+
+```kotlin
+import io.github.fredleonam.droidproof.scenario.Transport
+import io.github.fredleonam.droidproof.scenario.scenario
+import java.nio.file.Path
+
+scenario {
+    id = "release-order"
+    packageName = "com.example.app"
+    launchActivity = ".MainActivity"
+    backend {
+        transport = Transport.HTTPS
+        expectJson("""{"customer":"Proof42"}""")
+        respond(503, """{"error":"retry"}""", delayMillis = 250)
+        respond(201, """{"orderId":"42"}""")
+    }
+    typeText("customer", "Proof42")
+    tap("submit")
+    assertText("status", "Order 42 created")
+}.writeTo(Path.of("scenarios/release-proof.json"))
+```
+
+Resource names are expanded to `<packageName>:id/<name>`; fully qualified resource IDs are also accepted. Builders validate through the same constructors used by the runner, and the resulting file is accepted by the normal strict loader.
+
 ## Optional: sign and authenticate a bundle
 
 Integrity answers “does this bundle still match its manifest?” Authentication separately answers “does this manifest/timeline core verify with an externally trusted key?”
@@ -379,8 +465,9 @@ Recovery only writes when a fresh API level, build fingerprint, and boot identif
 | Target lifecycle | External device, existing AVD, or narrowly owned legacy-SDK provisioned AVD |
 | Reports | Deterministic, offline static HTML generated only from verified evidence |
 | Authentication | Optional JDK 17 Ed25519 signature with caller-supplied external public key |
+| Distribution | Installable CLI, publishable Gradle plugin, and Kotlin scenario-authoring DSL |
 
-Not implemented: arbitrary endpoint scripting, TLS MITM or general traffic interception, Espresso probes, a general-purpose scenario DSL or published Gradle plugin, PKI/revocation/timestamping, KMS/HSM integration, and remote attestation. The sample supports only explicit loopback TLS termination; it does not install a CA or redirect traffic.
+Not implemented: arbitrary endpoint scripting, TLS MITM or general traffic interception, Espresso probes, PKI/revocation/timestamping, KMS/HSM integration, and remote attestation. The sample supports only explicit loopback TLS termination; it does not install a CA or redirect traffic.
 
 ### Compose semantics assertions
 
@@ -410,6 +497,9 @@ droidproof-device      Narrow ADB capture
 droidproof-mock-server Deterministic loopback HTTP server
 droidproof-host        Preflight, lifecycle, scenario execution, publication
 droidproof-report      Verified static HTML report
+droidproof-scenario-dsl Typed Kotlin scenario authoring and JSON output
+droidproof-cli         Installable command-line interface
+droidproof-gradle-plugin Published plugin tasks and typed configuration
 samples/smoke-app      Demonstration Android app and scenarios
 docs/adr               Architecture decision records and detailed limits
 ```
