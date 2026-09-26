@@ -18,6 +18,25 @@ dependencies {
     implementation(project(":droidproof-mock-server"))
     implementation(project(":droidproof-model"))
     implementation(libs.kotlinx.serialization.json)
+    testImplementation(platform(libs.junit.bom))
+    testImplementation(libs.junit.jupiter)
+    testImplementation(libs.kotlin.test)
+}
+
+tasks.test {
+    useJUnitPlatform()
+}
+
+tasks.register<JavaExec>("generateExternalConsumerScenario") {
+    group = "verification"
+    description = "Generates the schema-v6 scenario used by the isolated plugin consumer check."
+    classpath = sourceSets.main.get().runtimeClasspath
+    mainClass.set("io.github.fredleonam.droidproof.scenario.GenerateExternalConsumerScenarioKt")
+    args(
+        providers.gradleProperty("droidproof.consumerScenarioPath")
+            .orElse(layout.buildDirectory.file("external-consumer/consumer-proof.json").map { it.asFile.absolutePath })
+            .get(),
+    )
 }
 
 publishing {

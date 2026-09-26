@@ -70,7 +70,7 @@ Install JDK 17, then run:
 ./gradlew check
 ```
 
-This checks all JVM modules without an Android SDK, ADB, emulator, device, Internet connection, or external server.
+This checks all JVM modules without an Android SDK, ADB, emulator, device, network service, or external server. It also runs an offline external-consumer verification that publishes to a fresh temporary Maven repository, exercises the installed CLI from a separate directory, and applies the plugin in a separate Gradle build.
 
 ### 2. Create evidence without Android
 
@@ -316,7 +316,7 @@ The static report has inline CSS, no JavaScript, and no external resources. It v
 
 ### Command-line interface
 
-Build an installable distribution, then invoke its `droidproof` launcher from any directory:
+Build an installable distribution, then invoke its `droidproof` launcher from any directory. The checked-in consumer verification covers `--help`, `--version`, valid and invalid scenario validation, verified reporting of synthetic evidence, exit statuses, and paths with spaces:
 
 ```bash
 ./gradlew :droidproof-cli:installDist
@@ -332,43 +332,59 @@ droidproof-cli/build/install/droidproof/bin/droidproof run \
   --output /absolute/path/to/evidence
 ```
 
-The CLI also provides `report`, `recover`, and `probe-android-cli`; use `droidproof COMMAND --help` for each command's arguments. Invalid usage exits with status 2, while an unsuccessful operation exits with status 1.
+The CLI also provides `report`, `recover`, and `probe-android-cli`; use `droidproof COMMAND --help` for each command's arguments. Invalid usage exits with status 2, while an unsuccessful operation exits with status 1. `probe-android-cli` writes a read-only compatibility report; Android CLI provisioning remains explicitly refused.
 
 ### Published Gradle plugin
 
-The plugin ID is `io.github.fredleonam.droidproof`. During local development, publish it and its runtime modules to Maven Local:
+The plugin ID is `io.github.fredleonam.droidproof`. For an isolated local consumer check, use the built-in verifier:
 
 ```bash
-./gradlew publishToMavenLocal
+./gradlew verifyExternalConsumer
 ```
 
-Apply the plugin in a consumer build and configure its typed extension:
+It publishes the plugin marker, DroidProof modules, and resolved runtime closure to a fresh temporary Maven repository, then runs a separate consumer build with `--offline`. It does not publish to Maven Local or prove availability from a public Maven repository.
 
-```kotlin
-// settings.gradle.kts, for a locally published development build
+The tested external consumer uses this repository configuration and applies the typed extension:
+
+```groovy
+// settings.gradle, where droidProofRepository is the isolated repository path
+def droidProofRepository = file('/absolute/path/to/droidproof-repository')
+
 pluginManagement {
     repositories {
-        mavenLocal()
-        gradlePluginPortal()
+        maven {
+            url = uri(droidProofRepository)
+            metadataSources { mavenPom(); artifact() }
+        }
     }
 }
+
+dependencyResolutionManagement {
+    repositories {
+        maven {
+            url = uri(droidProofRepository)
+            metadataSources { mavenPom(); artifact() }
+        }
+    }
+}
+
+rootProject.name = 'droidproof-external-consumer'
 ```
 
-```kotlin
-// build.gradle.kts
+```groovy
+// build.gradle
 plugins {
-    id("io.github.fredleonam.droidproof") version "0.1.0-SNAPSHOT"
+    id 'io.github.fredleonam.droidproof' version '0.1.0-SNAPSHOT'
 }
 
 droidProof {
-    apk.set(layout.projectDirectory.file("build/outputs/apk/release/app-release.apk"))
-    scenario.set(layout.projectDirectory.file("scenarios/release-proof.json"))
-    deviceSerial.set("emulator-5554")
-    adbPath.set(file("/absolute/path/to/adb"))
+    scenario.set(layout.projectDirectory.file('scenarios/release-proof.json'))
+    bundle.set(layout.projectDirectory.dir('sample evidence'))
+    report.set(layout.buildDirectory.file('reports/droidproof/evidence-report.html'))
 }
 ```
 
-`droidProofRun` executes the configured scenario, `droidProofValidateScenario` validates it without Android, and `droidProofReport` verifies `bundle` and writes `report`. The plugin artifact is `io.github.fredleonam.droidproof:droidproof-gradle-plugin`.
+`droidProofRun` executes the configured scenario, `droidProofValidateScenario` validates it without Android, and `droidProofReport` verifies `bundle` and writes `report`. The external verification generates a schema-v6 scenario with the DSL, validates it through the plugin, and creates a report from synthetic evidence. The plugin artifact is `io.github.fredleonam.droidproof:droidproof-gradle-plugin`.
 
 ### Kotlin scenario DSL
 
@@ -395,7 +411,7 @@ scenario {
 }.writeTo(Path.of("scenarios/release-proof.json"))
 ```
 
-Resource names are expanded to `<packageName>:id/<name>`; fully qualified resource IDs are also accepted. Builders validate through the same constructors used by the runner, and the resulting file is accepted by the normal strict loader.
+Resource names are expanded to `<packageName>:id/<name>`; fully qualified resource IDs are also accepted. Focused tests cover deterministic output, JSON round trips through the strict `SmokeScenarioLoader`, Compose assertions, backend responses and bounded faults, and representative invalid declarations. The external plugin consumer also validates a DSL-generated schema-v6 file.
 
 ## Optional: sign and authenticate a bundle
 
