@@ -11,7 +11,7 @@ import java.nio.file.Path
 
 fun main(args: Array<String>) = runSmokeScenario(RunSmokeScenarioConfiguration.parse(args))
 
-internal fun runSmokeScenario(configuration: RunSmokeScenarioConfiguration) {
+fun runSmokeScenario(configuration: RunSmokeScenarioConfiguration) {
     val adbPath = AdbPathResolver.resolve(configuration.adbPath)
     val signing =
         configuration.signingPrivateKeyPath?.let {

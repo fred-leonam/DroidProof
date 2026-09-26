@@ -2,6 +2,21 @@ package io.github.fredleonam.droidproof.host
 
 import java.nio.file.Path
 
+/** Runs the bounded read-only probe, writes its JSON report, and returns the outcome name. */
+fun writeAndroidCliCompatibilityReport(
+    androidCliPath: Path,
+    sdkRoot: Path,
+    timeoutMillis: Long,
+    outputPath: Path,
+): String {
+    val report =
+        AndroidCliCompatibilityProbe().inspect(
+            AndroidCliProbeConfiguration(androidCliPath, sdkRoot, timeoutMillis),
+        )
+    AndroidCliCompatibilityReportCodec.write(report, outputPath)
+    return report.outcome.name
+}
+
 fun main(args: Array<String>) {
     val configuration = AndroidCliDiagnosticConfiguration.parse(args)
     val report =
