@@ -2,6 +2,23 @@
 
 > Artifact-bound, evidence-oriented verification for Android applications.
 
+## Certificate-backed offline authentication
+
+Bundles can retain the existing Ed25519 public-key envelope, or use `authenticity.json` version 2 with a leaf-first X.509 certificate chain. The chain is signed with the manifest and timeline description, but is not trusted by itself. A verifier supplies trust anchors and optional CRLs from local files; DroidProof uses JDK 17 PKIX APIs and does not retrieve certificates or revocation data from the network.
+
+For a local report with a fixed evaluation time, use a local CA root and CRL:
+
+```bash
+droidproof report --bundle saved-bundle --output report.html \
+  --trust-anchor local-ca-root.pem --crl local-ca.crl \
+  --evaluation-time 2026-09-27T12:00:00Z \
+  --require-certificate-trust --require-good-revocation
+```
+
+The report separately displays bundle integrity, signature validity, certificate-chain trust, revocation status, and evaluation time. Missing or stale CRLs are `UNKNOWN`, never good; strict policy writes a diagnostic-only report when required trust checks fail. A local signing run may include `--signing-certificate-chain chain.pem` with the existing Ed25519 private and public key options.
+
+DroidProof does not yet provide trusted timestamping, transparency logging, KMS/HSM integration, remote attestation, or historical non-revocation. These are separate future milestones.
+
 ![DroidProof workflow](docs/images/droidproof-workflow.svg)
 
 DroidProof runs a small, controlled Android scenario and produces an evidence bundle that can be checked later. Rather than simply reporting that a test passed, it records the APK that ran, the scenario, selected emulator observations, UI captures, network observations, and an integrity inventory.

@@ -6,6 +6,7 @@ import io.github.fredleonam.droidproof.device.DeviceCollector
 import io.github.fredleonam.droidproof.evidence.BundleSigningConfiguration
 import io.github.fredleonam.droidproof.evidence.Ed25519KeyLoader
 import io.github.fredleonam.droidproof.evidence.EvidenceBundleWriter
+import io.github.fredleonam.droidproof.evidence.OfflineCertificateEvidenceLoader
 import io.github.fredleonam.droidproof.model.DroidProofVersion
 import java.nio.file.Path
 
@@ -18,6 +19,7 @@ fun runSmokeScenario(configuration: RunSmokeScenarioConfiguration) {
             BundleSigningConfiguration(
                 Ed25519KeyLoader.loadPrivateKey(it),
                 Ed25519KeyLoader.loadPublicKey(requireNotNull(configuration.signingPublicKeyPath)),
+                configuration.signingCertificateChainPath?.let(OfflineCertificateEvidenceLoader::certificates) ?: emptyList(),
             )
         }
     val coordinator =

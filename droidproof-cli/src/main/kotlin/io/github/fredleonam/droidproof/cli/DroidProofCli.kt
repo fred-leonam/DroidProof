@@ -2,7 +2,9 @@ package io.github.fredleonam.droidproof.cli
 
 import io.github.fredleonam.droidproof.device.AdbPathResolver
 import io.github.fredleonam.droidproof.evidence.AuthenticationStatus
+import io.github.fredleonam.droidproof.evidence.CertificateVerificationConfiguration
 import io.github.fredleonam.droidproof.evidence.Ed25519KeyLoader
+import io.github.fredleonam.droidproof.evidence.OfflineCertificateEvidenceLoader
 import io.github.fredleonam.droidproof.host.EmulatorEnvironmentRecoveryCoordinator
 import io.github.fredleonam.droidproof.host.EmulatorRecoveryRequest
 import io.github.fredleonam.droidproof.host.FileEmulatorRecoveryJournalStore
@@ -13,6 +15,7 @@ import io.github.fredleonam.droidproof.host.runSmokeScenario
 import io.github.fredleonam.droidproof.host.writeAndroidCliCompatibilityReport
 import io.github.fredleonam.droidproof.report.EvidenceReportGenerator
 import java.nio.file.Path
+import java.time.Instant
 import kotlin.system.exitProcess
 
 fun main(arguments: Array<String>) {
@@ -70,6 +73,7 @@ private fun run(options: Options) {
             "replaceExisting" to options.boolean("replace-existing", false).toString(),
             "signingPrivateKeyPath" to options.optional("signing-private-key"),
             "signingPublicKeyPath" to options.optional("signing-public-key"),
+            "signingCertificateChainPath" to options.optional("signing-certificate-chain"),
             "environmentPath" to options.optional("environment"),
             "environmentMode" to options.optional("environment-mode", "VERIFY_ONLY"),
             "recoveryStateRoot" to working.resolve(".droidproof-recovery").toString(),
@@ -107,8 +111,33 @@ private fun report(options: Options) {
     val bundle = Path.of(options.required("bundle"))
     val output = Path.of(options.required("output"))
     val trusted = options.optionalValue("trusted-public-key")?.let { Ed25519KeyLoader.loadPublicKey(Path.of(it)) }
+    val anchors =
+        options.optionalValue("trust-anchor")?.split(',')?.filter {
+            it.isNotBlank()
+        }?.flatMap { OfflineCertificateEvidenceLoader.certificates(Path.of(it)) }?.toSet() ?: emptySet()
+    val crls =
+        options.optionalValue("crl")?.split(',')?.filter {
+            it.isNotBlank()
+        }?.flatMap { path ->
+            OfflineCertificateEvidenceLoader.crls(Path.of(path))
+        } ?: emptyList()
+    val requireTrust = options.boolean("require-certificate-trust", false)
+    val requireRevocation = options.boolean("require-good-revocation", false)
+    val evaluationTime = options.optionalValue("evaluation-time")?.let { Instant.parse(it) } ?: Instant.now()
     options.ensureConsumed()
-    val result = EvidenceReportGenerator().generate(bundle, output, trusted)
+    val certificate =
+        if (anchors.isNotEmpty() || crls.isNotEmpty() || requireTrust || requireRevocation) {
+            CertificateVerificationConfiguration(
+                anchors,
+                crls,
+                evaluationTime,
+                requireTrust,
+                requireRevocation,
+            )
+        } else {
+            null
+        }
+    val result = EvidenceReportGenerator().generate(bundle, output, trusted, certificate)
     println("DroidProof evidence report: ${result.output}")
     check(result.verification.isValid) { "Bundle verification failed; a diagnostic report was written." }
     check(result.verification.authentication.status != AuthenticationStatus.INVALID) {
@@ -210,7 +239,10 @@ private fun commandHelp(command: String): String =
     when (command) {
         "run" -> RUN_HELP
         "validate-scenario" -> "Usage: droidproof validate-scenario --scenario PATH"
-        "report" -> "Usage: droidproof report --bundle DIR --output FILE [--trusted-public-key FILE]"
+        "report" ->
+            "Usage: droidproof report --bundle DIR --output FILE [--trusted-public-key FILE] " +
+                "[--trust-anchor FILE[,FILE]] [--crl FILE[,FILE]] [--evaluation-time INSTANT] " +
+                "[--require-certificate-trust] [--require-good-revocation]"
         "recover" -> "Usage: droidproof recover --device-serial SERIAL --recovery-state-root DIR [--adb PATH]"
         "probe-android-cli" -> "Usage: droidproof probe-android-cli --android-cli PATH --sdk-root DIR --output FILE"
         else -> throw IllegalArgumentException("Unknown command '$command'.")
@@ -241,4 +273,5 @@ Common options:
   --environment-mode MODE       VERIFY_ONLY or APPLY_AND_RESTORE
   --replace-existing[=true]     Replace different installed APK bytes
   --signing-private-key FILE    Ed25519 private key (requires public key)
-  --signing-public-key FILE     Ed25519 public key"""
+  --signing-public-key FILE     Ed25519 public key
+  --signing-certificate-chain FILE  PEM/DER leaf-first signing certificate chain"""

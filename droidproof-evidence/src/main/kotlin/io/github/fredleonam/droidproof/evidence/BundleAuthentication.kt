@@ -12,12 +12,16 @@ import java.security.KeyFactory
 import java.security.PrivateKey
 import java.security.PublicKey
 import java.security.Signature
+import java.security.cert.CertificateFactory
+import java.security.cert.X509CRL
+import java.security.cert.X509Certificate
 import java.security.spec.PKCS8EncodedKeySpec
 import java.security.spec.X509EncodedKeySpec
 import java.util.Base64
 
 const val AUTHENTICITY_FILE = "authenticity.json"
 const val AUTHENTICATION_SCHEMA_VERSION = 1
+const val CERTIFICATE_AUTHENTICATION_SCHEMA_VERSION = 2
 const val AUTHENTICATION_ALGORITHM = "Ed25519"
 
 @Serializable
@@ -34,11 +38,30 @@ data class BundleAuthenticationEnvelope(
     val keyId: Sha256,
     val coreFiles: List<AuthenticatedCoreFile>,
     val signature: String,
+    /** DER certificates, base64 encoded, leaf first. Present only in schema v2. */
+    val certificateChain: List<String>? = null,
 )
 
 data class BundleSigningConfiguration(
     val privateKey: PrivateKey,
     val publicKey: PublicKey,
+    val certificateChain: List<X509Certificate> = emptyList(),
+)
+
+enum class AuthenticationCheck { NOT_CHECKED, GOOD, FAILED, UNKNOWN, REVOKED }
+
+/** Inputs are deliberately external to the bundle. No network retrieval is performed. */
+data class CertificateVerificationConfiguration(
+    val trustAnchors: Set<X509Certificate> = emptySet(),
+    val crls: List<X509CRL> = emptyList(),
+    val evaluationTime: java.time.Instant = java.time.Instant.now(),
+    val requireCertificateTrust: Boolean = false,
+    val requireGoodRevocation: Boolean = false,
+)
+
+data class BundleVerificationConfiguration(
+    val trustedPublicKey: PublicKey? = null,
+    val certificate: CertificateVerificationConfiguration? = null,
 )
 
 enum class AuthenticationStatus {
@@ -64,6 +87,18 @@ enum class AuthenticationIssueCode {
     MALFORMED_SIGNATURE,
     INVALID_SIGNATURE,
     BUNDLE_INTEGRITY_FAILED,
+    CERTIFICATE_CHAIN_MISSING,
+    CERTIFICATE_CHAIN_MALFORMED,
+    CERTIFICATE_CHAIN_DUPLICATE,
+    CERTIFICATE_CHAIN_ORDER_INVALID,
+    CERTIFICATE_LEAF_KEY_MISMATCH,
+    CERTIFICATE_TRUST_NOT_CONFIGURED,
+    CERTIFICATE_CHAIN_UNTRUSTED,
+    CERTIFICATE_POLICY_FAILED,
+    REVOCATION_UNKNOWN,
+    REVOCATION_REVOKED,
+    STRICT_CERTIFICATE_TRUST_REQUIRED,
+    STRICT_GOOD_REVOCATION_REQUIRED,
 }
 
 data class AuthenticationIssue(
@@ -77,6 +112,10 @@ data class BundleAuthenticationResult(
     val algorithm: String? = null,
     val keyId: Sha256? = null,
     val issues: List<AuthenticationIssue> = emptyList(),
+    val signature: AuthenticationCheck = AuthenticationCheck.NOT_CHECKED,
+    val chainTrust: AuthenticationCheck = AuthenticationCheck.NOT_CHECKED,
+    val revocation: AuthenticationCheck = AuthenticationCheck.NOT_CHECKED,
+    val evaluationTime: java.time.Instant? = null,
 ) {
     val isAuthenticated: Boolean get() = status == AuthenticationStatus.AUTHENTICATED
 }
@@ -137,6 +176,38 @@ object Ed25519KeyLoader {
     private const val MAX_KEY_FILE_BYTES = 64 * 1024
 }
 
+/** Strict bounded loaders for verifier supplied certificate and CRL files. */
+object OfflineCertificateEvidenceLoader {
+    private const val MAX_BYTES = 1024 * 1024
+
+    fun certificates(path: Path): List<X509Certificate> =
+        load(path).let { bytes ->
+            val values =
+                CertificateFactory.getInstance("X.509").generateCertificates(bytes.inputStream())
+                    .map { it as? X509Certificate ?: throw IllegalArgumentException("Certificate input contains a non-X.509 certificate.") }
+            require(values.isNotEmpty() && values.size <= 16) { "Certificate input must contain 1 through 16 X.509 certificates." }
+            values
+        }
+
+    fun crls(path: Path): List<X509CRL> =
+        load(path).let { bytes ->
+            val values =
+                CertificateFactory.getInstance("X.509").generateCRLs(bytes.inputStream())
+                    .map { it as? X509CRL ?: throw IllegalArgumentException("Revocation input contains a non-X.509 CRL.") }
+            require(values.isNotEmpty() && values.size <= 32) { "Revocation input must contain 1 through 32 X.509 CRLs." }
+            values
+        }
+
+    private fun load(path: Path): ByteArray {
+        require(!Files.isSymbolicLink(path)) { "Certificate input must not be a symbolic link." }
+        require(Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) { "Certificate input must be a regular file." }
+        require(Files.size(path) <= MAX_BYTES) { "Certificate input exceeds $MAX_BYTES bytes." }
+        return Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS).use { input ->
+            input.readNBytes(MAX_BYTES + 1).also { require(it.size <= MAX_BYTES) { "Certificate input exceeds $MAX_BYTES bytes." } }
+        }
+    }
+}
+
 internal object BundleAuthenticator {
     fun keyId(publicKey: PublicKey): Sha256 = Sha256Calculator.calculate(publicKey.encoded.inputStream())
 
@@ -158,6 +229,22 @@ internal object BundleAuthenticator {
                 }
             }
         return message.toByteArray(StandardCharsets.US_ASCII)
+    }
+
+    fun certificateSigningMessage(
+        coreFiles: List<AuthenticatedCoreFile>,
+        chain: List<X509Certificate>,
+    ): ByteArray {
+        require(
+            chain.isNotEmpty() && chain.size <= MAX_CERTIFICATES,
+        ) { "Certificate chain must contain 1 through $MAX_CERTIFICATES certificates." }
+        val chainDescription =
+            chain.joinToString("") { certificate ->
+                val encoded = certificate.encoded
+                "${encoded.size}\n${Sha256Calculator.calculate(encoded.inputStream()).value}\n"
+            }
+        return (CERTIFICATE_DOMAIN_SEPARATOR + signingMessage(coreFiles).toString(StandardCharsets.US_ASCII) + chainDescription)
+            .toByteArray(StandardCharsets.US_ASCII)
     }
 
     fun sign(
@@ -182,5 +269,7 @@ internal object BundleAuthenticator {
         }
 
     val AUTHENTICATED_CORE_PATHS = listOf(MANIFEST_FILE, TIMELINE_FILE)
+    const val MAX_CERTIFICATES = 8
     private const val DOMAIN_SEPARATOR = "DroidProof authenticated evidence bundle v1\n"
+    private const val CERTIFICATE_DOMAIN_SEPARATOR = "DroidProof certificate authenticated evidence bundle v2\n"
 }

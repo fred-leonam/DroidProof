@@ -1,7 +1,9 @@
 package io.github.fredleonam.droidproof.gradle
 
 import io.github.fredleonam.droidproof.evidence.AuthenticationStatus
+import io.github.fredleonam.droidproof.evidence.CertificateVerificationConfiguration
 import io.github.fredleonam.droidproof.evidence.Ed25519KeyLoader
+import io.github.fredleonam.droidproof.evidence.OfflineCertificateEvidenceLoader
 import io.github.fredleonam.droidproof.host.EmulatorBackend
 import io.github.fredleonam.droidproof.host.RunSmokeScenarioConfiguration
 import io.github.fredleonam.droidproof.host.SmokeScenarioLoader
@@ -18,6 +20,7 @@ import org.gradle.api.tasks.Internal
 import org.gradle.api.tasks.TaskAction
 import org.gradle.work.DisableCachingByDefault
 import java.nio.file.Path
+import java.time.Instant
 
 abstract class DroidProofExtension {
     abstract val apk: RegularFileProperty
@@ -28,6 +31,7 @@ abstract class DroidProofExtension {
     abstract val replaceExisting: Property<Boolean>
     abstract val signingPrivateKey: RegularFileProperty
     abstract val signingPublicKey: RegularFileProperty
+    abstract val signingCertificateChain: RegularFileProperty
     abstract val environment: RegularFileProperty
     abstract val environmentMode: Property<EnvironmentExecutionMode>
     abstract val recoveryStateRoot: DirectoryProperty
@@ -45,6 +49,11 @@ abstract class DroidProofExtension {
     abstract val bundle: DirectoryProperty
     abstract val report: RegularFileProperty
     abstract val trustedPublicKey: RegularFileProperty
+    abstract val trustAnchor: RegularFileProperty
+    abstract val revocationCrl: RegularFileProperty
+    abstract val requireCertificateTrust: Property<Boolean>
+    abstract val requireGoodRevocation: Property<Boolean>
+    abstract val certificateEvaluationTime: Property<String>
 }
 
 class DroidProofPlugin : Plugin<Project> {
@@ -62,6 +71,8 @@ class DroidProofPlugin : Plugin<Project> {
         extension.avdManagerPath.convention("avdmanager")
         extension.emulatorBackend.convention(EmulatorBackend.LEGACY)
         extension.report.convention(project.layout.buildDirectory.file("reports/droidproof/evidence-report.html"))
+        extension.requireCertificateTrust.convention(false)
+        extension.requireGoodRevocation.convention(false)
 
         project.tasks.register("droidProofRun", DroidProofRunTask::class.java) {
             it.group = "droidproof"
@@ -118,6 +129,7 @@ abstract class DroidProofRunTask : DefaultTask() {
                 droidProofVersion,
                 extension.emulatorBackend.get(),
                 extension.androidCliPath.orNull?.asFile?.toPath(),
+                extension.signingCertificateChain.orNull?.asFile?.toPath(),
             ),
         )
     }
@@ -148,11 +160,32 @@ abstract class DroidProofReportTask : DefaultTask() {
         val extension = configuration
         val trustedKey =
             extension.trustedPublicKey.orNull?.asFile?.toPath()?.let(Ed25519KeyLoader::loadPublicKey)
+        val anchors =
+            extension.trustAnchor.orNull?.asFile?.toPath()?.let(OfflineCertificateEvidenceLoader::certificates)?.toSet()
+                ?: emptySet()
+        val crls =
+            extension.revocationCrl.orNull?.asFile?.toPath()?.let(OfflineCertificateEvidenceLoader::crls)
+                ?: emptyList()
+        val requireTrust = extension.requireCertificateTrust.get()
+        val requireRevocation = extension.requireGoodRevocation.get()
+        val certificate =
+            if (anchors.isNotEmpty() || crls.isNotEmpty() || requireTrust || requireRevocation) {
+                CertificateVerificationConfiguration(
+                    anchors,
+                    crls,
+                    extension.certificateEvaluationTime.orNull?.let(Instant::parse) ?: Instant.now(),
+                    requireTrust,
+                    requireRevocation,
+                )
+            } else {
+                null
+            }
         val result =
             EvidenceReportGenerator().generate(
                 extension.bundle.get().asFile.toPath(),
                 extension.report.get().asFile.toPath(),
                 trustedKey,
+                certificate,
             )
         logger.lifecycle("DroidProof evidence report: {}", result.output)
         check(result.verification.isValid) { "Bundle verification failed; a diagnostic report was written." }

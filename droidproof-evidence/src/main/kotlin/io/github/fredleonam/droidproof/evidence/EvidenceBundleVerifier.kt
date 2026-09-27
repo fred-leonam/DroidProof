@@ -21,7 +21,14 @@ import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.security.PublicKey
+import java.security.cert.CertPathValidator
+import java.security.cert.CertificateFactory
+import java.security.cert.PKIXParameters
+import java.security.cert.TrustAnchor
+import java.security.cert.X509CRL
+import java.security.cert.X509Certificate
 import java.util.Base64
+import java.util.Date
 import java.util.Locale
 
 enum class VerificationSeverity {
@@ -82,6 +89,11 @@ class EvidenceBundleVerifier internal constructor(private val files: Verificatio
     fun verify(
         bundle: Path,
         trustedPublicKey: PublicKey? = null,
+    ): EvidenceBundleVerificationResult = verify(bundle, BundleVerificationConfiguration(trustedPublicKey))
+
+    fun verify(
+        bundle: Path,
+        configuration: BundleVerificationConfiguration,
     ): EvidenceBundleVerificationResult {
         val root = bundle.toAbsolutePath().normalize()
         val issues = mutableListOf<VerificationIssue>()
@@ -90,7 +102,7 @@ class EvidenceBundleVerifier internal constructor(private val files: Verificatio
             EvidenceBundleVerificationResult(
                 schemaVersion,
                 issues,
-                verifyAuthentication(root, trustedPublicKey, issues.none { it.severity == VerificationSeverity.ERROR }),
+                verifyAuthentication(root, configuration, issues.none { it.severity == VerificationSeverity.ERROR }),
             )
 
         if (Files.isSymbolicLink(root)) {
@@ -187,12 +199,14 @@ class EvidenceBundleVerifier internal constructor(private val files: Verificatio
 
     private fun verifyAuthentication(
         root: Path,
-        trustedPublicKey: PublicKey?,
+        configuration: BundleVerificationConfiguration,
         integrityValid: Boolean,
     ): BundleAuthenticationResult {
+        val trustedPublicKey = configuration.trustedPublicKey
+        val certificateConfiguration = configuration.certificate
         val path = root.resolve(AUTHENTICITY_FILE)
         if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
-            return if (trustedPublicKey == null) {
+            return if (trustedPublicKey == null && certificateConfiguration?.requireCertificateTrust != true) {
                 BundleAuthenticationResult(AuthenticationStatus.UNSIGNED)
             } else {
                 invalid(
@@ -259,7 +273,7 @@ class EvidenceBundleVerifier internal constructor(private val files: Verificatio
                     AUTHENTICITY_FILE,
                 )
             }
-        if (envelope.schemaVersion != AUTHENTICATION_SCHEMA_VERSION) {
+        if (envelope.schemaVersion !in setOf(AUTHENTICATION_SCHEMA_VERSION, CERTIFICATE_AUTHENTICATION_SCHEMA_VERSION)) {
             return invalid(
                 AuthenticationIssueCode.UNSUPPORTED_AUTHENTICATION_SCHEMA,
                 "Unsupported authentication schema version: ${envelope.schemaVersion}.",
@@ -271,6 +285,14 @@ class EvidenceBundleVerifier internal constructor(private val files: Verificatio
             return invalid(
                 AuthenticationIssueCode.UNSUPPORTED_AUTHENTICATION_ALGORITHM,
                 "Unsupported authentication algorithm: ${envelope.algorithm}.",
+                AUTHENTICITY_FILE,
+                envelope,
+            )
+        }
+        if (envelope.schemaVersion == AUTHENTICATION_SCHEMA_VERSION && envelope.certificateChain != null) {
+            return invalid(
+                AuthenticationIssueCode.MALFORMED_AUTHENTICATION_JSON,
+                "Version 1 authentication must not contain certificates.",
                 AUTHENTICITY_FILE,
                 envelope,
             )
@@ -327,14 +349,35 @@ class EvidenceBundleVerifier internal constructor(private val files: Verificatio
                 )
             }
         }
-        if (trustedPublicKey == null) {
+        val chain =
+            if (envelope.schemaVersion == CERTIFICATE_AUTHENTICATION_SCHEMA_VERSION) {
+                decodeChain(envelope) ?: return invalid(
+                    AuthenticationIssueCode.CERTIFICATE_CHAIN_MALFORMED,
+                    "Certificate chain is malformed.",
+                    AUTHENTICITY_FILE,
+                    envelope,
+                )
+            } else {
+                emptyList()
+            }
+        val signingKey = chain.firstOrNull()?.publicKey ?: trustedPublicKey
+        if (chain.isNotEmpty() && BundleAuthenticator.keyId(chain.first().publicKey) != envelope.keyId) {
+            return invalid(
+                AuthenticationIssueCode.CERTIFICATE_LEAF_KEY_MISMATCH,
+                "Leaf certificate public key does not match the recorded key ID.",
+                AUTHENTICITY_FILE,
+                envelope,
+            )
+        }
+        if (signingKey == null) {
             return BundleAuthenticationResult(
                 AuthenticationStatus.SIGNED_UNTRUSTED,
                 envelope.algorithm,
                 envelope.keyId,
+                signature = AuthenticationCheck.NOT_CHECKED,
             )
         }
-        if (BundleAuthenticator.keyId(trustedPublicKey) != envelope.keyId) {
+        if (trustedPublicKey != null && BundleAuthenticator.keyId(trustedPublicKey) != envelope.keyId) {
             return invalid(
                 AuthenticationIssueCode.TRUSTED_KEY_ID_MISMATCH,
                 "Authentication key ID does not match the externally trusted public key.",
@@ -344,7 +387,15 @@ class EvidenceBundleVerifier internal constructor(private val files: Verificatio
         }
         val validSignature =
             try {
-                BundleAuthenticator.verify(trustedPublicKey, BundleAuthenticator.signingMessage(envelope.coreFiles), signature)
+                BundleAuthenticator.verify(
+                    signingKey,
+                    if (chain.isEmpty()) {
+                        BundleAuthenticator.signingMessage(envelope.coreFiles)
+                    } else {
+                        BundleAuthenticator.certificateSigningMessage(envelope.coreFiles, chain)
+                    },
+                    signature,
+                )
             } catch (_: Exception) {
                 false
             }
@@ -364,11 +415,207 @@ class EvidenceBundleVerifier internal constructor(private val files: Verificatio
                 envelope,
             )
         }
+        if (chain.isEmpty()) {
+            return BundleAuthenticationResult(
+                AuthenticationStatus.AUTHENTICATED,
+                envelope.algorithm,
+                envelope.keyId,
+                signature = AuthenticationCheck.GOOD,
+            )
+        }
+        val certificateResult = validateCertificateChain(chain, certificateConfiguration)
+        val failedRequired =
+            (certificateConfiguration?.requireCertificateTrust == true && certificateResult.chainTrust != AuthenticationCheck.GOOD) ||
+                (certificateConfiguration?.requireGoodRevocation == true && certificateResult.revocation != AuthenticationCheck.GOOD)
+        val strictIssues = certificateResult.issues.toMutableList()
+        if (certificateConfiguration?.requireCertificateTrust == true && certificateResult.chainTrust != AuthenticationCheck.GOOD) {
+            strictIssues.add(
+                AuthenticationIssue(
+                    AuthenticationIssueCode.STRICT_CERTIFICATE_TRUST_REQUIRED,
+                    "Verification policy requires a trusted certificate chain.",
+                ),
+            )
+        }
+        if (certificateConfiguration?.requireGoodRevocation == true && certificateResult.revocation != AuthenticationCheck.GOOD) {
+            strictIssues.add(
+                AuthenticationIssue(
+                    AuthenticationIssueCode.STRICT_GOOD_REVOCATION_REQUIRED,
+                    "Verification policy requires current good revocation evidence.",
+                ),
+            )
+        }
         return BundleAuthenticationResult(
-            AuthenticationStatus.AUTHENTICATED,
+            if (failedRequired) {
+                AuthenticationStatus.INVALID
+            } else if (certificateResult.chainTrust == AuthenticationCheck.GOOD) {
+                AuthenticationStatus.AUTHENTICATED
+            } else {
+                AuthenticationStatus.SIGNED_UNTRUSTED
+            },
             envelope.algorithm,
             envelope.keyId,
+            strictIssues,
+            AuthenticationCheck.GOOD,
+            certificateResult.chainTrust,
+            certificateResult.revocation,
+            certificateConfiguration?.evaluationTime,
         )
+    }
+
+    private data class CertificateResult(
+        val chainTrust: AuthenticationCheck,
+        val revocation: AuthenticationCheck,
+        val issues: List<AuthenticationIssue>,
+    )
+
+    private fun decodeChain(envelope: BundleAuthenticationEnvelope): List<X509Certificate>? {
+        try {
+            val encoded = envelope.certificateChain ?: return null
+            if (encoded.isEmpty() || encoded.size > BundleAuthenticator.MAX_CERTIFICATES || encoded.any { it.length > 128 * 1024 }) {
+                return null
+            }
+            val certificates =
+                encoded.map {
+                    CertificateFactory.getInstance(
+                        "X.509",
+                    ).generateCertificate(Base64.getDecoder().decode(it).inputStream()) as X509Certificate
+                }
+            if (certificates.map { Base64.getEncoder().encodeToString(it.encoded) }.toSet().size != certificates.size) return null
+            certificates.zipWithNext().forEach { (child, issuer) ->
+                if (child.issuerX500Principal != issuer.subjectX500Principal) return null
+                child.verify(issuer.publicKey)
+            }
+            return certificates
+        } catch (_: Exception) {
+            return null
+        }
+    }
+
+    private fun validateCertificateChain(
+        chain: List<X509Certificate>,
+        configuration: CertificateVerificationConfiguration?,
+    ): CertificateResult {
+        if (configuration == null || configuration.trustAnchors.isEmpty()) {
+            return CertificateResult(
+                AuthenticationCheck.NOT_CHECKED,
+                AuthenticationCheck.NOT_CHECKED,
+                listOf(
+                    AuthenticationIssue(
+                        AuthenticationIssueCode.CERTIFICATE_TRUST_NOT_CONFIGURED,
+                        "Certificate chain is embedded input; no external trust anchors were configured.",
+                        AUTHENTICITY_FILE,
+                    ),
+                ),
+            )
+        }
+        val time = Date.from(configuration.evaluationTime)
+        try {
+            chain.forEach { it.checkValidity(time) }
+            val leaf = chain.first()
+            if (leaf.basicConstraints >= 0 || leaf.keyUsage?.getOrNull(0) == false) {
+                throw IllegalArgumentException(
+                    "Leaf does not meet producer signing policy.",
+                )
+            }
+            chain.drop(1).forEach {
+                    certificate ->
+                if (certificate.basicConstraints < 0 || certificate.keyUsage?.getOrNull(5) == false) {
+                    throw IllegalArgumentException(
+                        "Issuer does not meet CA policy.",
+                    )
+                }
+            }
+            val anchors = configuration.trustAnchors.map { TrustAnchor(it, null) }.toSet()
+            val pathCertificates =
+                chain.dropLast(
+                    if (configuration.trustAnchors.any { it.encoded.contentEquals(chain.last().encoded) }) 1 else 0,
+                )
+            val parameters =
+                PKIXParameters(anchors).apply {
+                    isRevocationEnabled = false
+                    date = time
+                }
+            CertPathValidator.getInstance(
+                "PKIX",
+            ).validate(CertificateFactory.getInstance("X.509").generateCertPath(pathCertificates), parameters)
+        } catch (_: Exception) {
+            return CertificateResult(
+                AuthenticationCheck.FAILED,
+                AuthenticationCheck.NOT_CHECKED,
+                listOf(
+                    AuthenticationIssue(
+                        AuthenticationIssueCode.CERTIFICATE_CHAIN_UNTRUSTED,
+                        "Certificate chain did not validate against configured trust anchors and producer policy.",
+                        AUTHENTICITY_FILE,
+                    ),
+                ),
+            )
+        }
+        return CertificateResult(
+            AuthenticationCheck.GOOD,
+            evaluateRevocation(chain, configuration.crls, configuration.evaluationTime),
+            emptyList(),
+        ).let {
+                result ->
+            if (result.revocation == AuthenticationCheck.UNKNOWN) {
+                result.copy(
+                    issues =
+                        listOf(
+                            AuthenticationIssue(
+                                AuthenticationIssueCode.REVOCATION_UNKNOWN,
+                                "No current applicable offline CRL proves the certificate is not revoked at evaluation time.",
+                                AUTHENTICITY_FILE,
+                            ),
+                        ),
+                )
+            } else if (result.revocation == AuthenticationCheck.REVOKED) {
+                result.copy(
+                    issues =
+                        listOf(
+                            AuthenticationIssue(
+                                AuthenticationIssueCode.REVOCATION_REVOKED,
+                                "A current applicable offline CRL lists a certificate in the signing path.",
+                                AUTHENTICITY_FILE,
+                            ),
+                        ),
+                )
+            } else {
+                result
+            }
+        }
+    }
+
+    private fun evaluateRevocation(
+        chain: List<X509Certificate>,
+        crls: List<X509CRL>,
+        time: java.time.Instant,
+    ): AuthenticationCheck {
+        if (crls.isEmpty()) return AuthenticationCheck.UNKNOWN
+        val at = Date.from(time)
+        for (certificate in chain.dropLast(1)) {
+            val issuer =
+                chain.firstOrNull { it.subjectX500Principal == certificate.issuerX500Principal }
+                    ?: return AuthenticationCheck.UNKNOWN
+            val usable =
+                crls.filter { crl ->
+                    try {
+                        crl.issuerX500Principal == issuer.subjectX500Principal &&
+                            !crl.thisUpdate.after(at) &&
+                            crl.nextUpdate?.before(at) != true &&
+                            run {
+                                crl.verify(issuer.publicKey)
+                                true
+                            }
+                    } catch (
+                        _: Exception,
+                    ) {
+                        false
+                    }
+                }
+            if (usable.isEmpty()) return AuthenticationCheck.UNKNOWN
+            if (usable.any { it.getRevokedCertificate(certificate.serialNumber) != null }) return AuthenticationCheck.REVOKED
+        }
+        return AuthenticationCheck.GOOD
     }
 
     private fun invalid(
