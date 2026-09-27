@@ -1,6 +1,8 @@
 package io.github.fredleonam.droidproof.report
 
 import io.github.fredleonam.droidproof.evidence.AuthenticationStatus
+import io.github.fredleonam.droidproof.evidence.BundleVerificationConfiguration
+import io.github.fredleonam.droidproof.evidence.CertificateVerificationConfiguration
 import io.github.fredleonam.droidproof.evidence.EvidenceBundleVerificationResult
 import io.github.fredleonam.droidproof.evidence.EvidenceBundleVerifier
 import io.github.fredleonam.droidproof.evidence.MANIFEST_FILE
@@ -42,8 +44,13 @@ class EvidenceReportGenerator {
         bundlePath: Path,
         reportPath: Path,
         trustedPublicKey: PublicKey? = null,
+        certificateConfiguration: CertificateVerificationConfiguration? = null,
     ): EvidenceReportResult {
-        val verification = EvidenceBundleVerifier().verify(bundlePath, trustedPublicKey)
+        val verification =
+            EvidenceBundleVerifier().verify(
+                bundlePath,
+                BundleVerificationConfiguration(trustedPublicKey, certificateConfiguration),
+            )
         val bundle = bundlePath.toAbsolutePath().normalize()
         val output = reportPath.toAbsolutePath().normalize()
         requireOutputOutsideBundle(bundle, output)
@@ -232,12 +239,25 @@ class EvidenceReportGenerator {
                     verification.authentication.keyId?.let { append(row("Claimed key ID", it.value)) }
                 }
                 AuthenticationStatus.AUTHENTICATED -> {
-                    append(row("Authentication", "AUTHENTICATED with externally supplied public key"))
+                    append(
+                        row(
+                            "Authentication",
+                            if (verification.authentication.chainTrust.name == "GOOD") {
+                                "AUTHENTICATED with externally configured certificate trust"
+                            } else {
+                                "AUTHENTICATED with externally supplied public key"
+                            },
+                        ),
+                    )
                     verification.authentication.algorithm?.let { append(row("Signature algorithm", it)) }
                     verification.authentication.keyId?.let { append(row("Trusted key ID", it.value)) }
                 }
                 AuthenticationStatus.INVALID -> append(row("Authentication", "FAILED"))
             }
+            append(row("Signature validity", verification.authentication.signature.name))
+            append(row("Certificate chain trust", verification.authentication.chainTrust.name))
+            append(row("Revocation", verification.authentication.revocation.name))
+            verification.authentication.evaluationTime?.let { append(row("Certificate evaluation time", it.toString())) }
             appendLine("</dl>")
             if (verification.issues.isEmpty()) {
                 appendLine("<p>No verification warnings.</p>")

@@ -128,7 +128,7 @@ class EvidenceBundleWriter internal constructor(
             writeJsonDocuments(staging, manifest, request.events)
             signing?.let { writeAuthenticationEnvelope(staging, it) }
             val verification = EvidenceBundleVerifier().verify(staging, signing?.publicKey)
-            if (!verification.isValid || (signing != null && !verification.authentication.isAuthenticated)) {
+            if (!verification.isValid || verification.authentication.status == AuthenticationStatus.INVALID) {
                 throw EvidenceBundleValidationException(
                     "Constructed bundle failed verification: ${verification.issues + verification.authentication.issues}",
                 )
@@ -165,7 +165,7 @@ class EvidenceBundleWriter internal constructor(
             writeJsonDocuments(staging, evidenceJson.encodeToString(manifest), request.events)
             signing?.let { writeAuthenticationEnvelope(staging, it) }
             val verification = EvidenceBundleVerifier().verify(staging, signing?.publicKey)
-            if (!verification.isValid || (signing != null && !verification.authentication.isAuthenticated)) {
+            if (!verification.isValid || verification.authentication.status == AuthenticationStatus.INVALID) {
                 throw EvidenceBundleValidationException(
                     "Constructed bundle failed verification: ${verification.issues + verification.authentication.issues}",
                 )
@@ -330,14 +330,30 @@ class EvidenceBundleWriter internal constructor(
         signing: BundleSigningConfiguration,
     ) {
         val coreFiles = BundleAuthenticator.describe(directory)
-        val signature = BundleAuthenticator.sign(signing.privateKey, BundleAuthenticator.signingMessage(coreFiles))
+        val chain = signing.certificateChain
+        val chainMatchesKey = chain.firstOrNull()?.publicKey?.encoded?.contentEquals(signing.publicKey.encoded) ?: true
+        require(chain.size <= BundleAuthenticator.MAX_CERTIFICATES && chainMatchesKey) {
+            "Certificate signing chain must start with the signing public key and be bounded."
+        }
+        val signature =
+            BundleAuthenticator.sign(
+                signing.privateKey,
+                if (chain.isEmpty()) {
+                    BundleAuthenticator.signingMessage(
+                        coreFiles,
+                    )
+                } else {
+                    BundleAuthenticator.certificateSigningMessage(coreFiles, chain)
+                },
+            )
         val envelope =
             BundleAuthenticationEnvelope(
-                schemaVersion = AUTHENTICATION_SCHEMA_VERSION,
+                schemaVersion = if (chain.isEmpty()) AUTHENTICATION_SCHEMA_VERSION else CERTIFICATE_AUTHENTICATION_SCHEMA_VERSION,
                 algorithm = AUTHENTICATION_ALGORITHM,
                 keyId = BundleAuthenticator.keyId(signing.publicKey),
                 coreFiles = coreFiles,
                 signature = Base64.getEncoder().encodeToString(signature),
+                certificateChain = chain.takeIf { it.isNotEmpty() }?.map { Base64.getEncoder().encodeToString(it.encoded) },
             )
         Files.writeString(
             directory.resolve(AUTHENTICITY_FILE),

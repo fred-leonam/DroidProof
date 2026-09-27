@@ -30,6 +30,7 @@ data class RunSmokeScenarioConfiguration(
     val version: String,
     val emulatorBackend: EmulatorBackend,
     val androidCliPath: Path?,
+    val signingCertificateChainPath: Path? = null,
 ) {
     init {
         require(listOf(deviceSerial, avdName, provisioningPath).count { it != null } == 1) {
@@ -39,6 +40,9 @@ data class RunSmokeScenarioConfiguration(
         require(avdName == null || Regex("[A-Za-z0-9._-]{1,128}").matches(avdName)) { "droidproof.avdName is invalid." }
         require((signingPrivateKeyPath == null) == (signingPublicKeyPath == null)) {
             "droidproof.signingPrivateKeyPath and droidproof.signingPublicKeyPath must be supplied together."
+        }
+        require(signingCertificateChainPath == null || signingPrivateKeyPath != null) {
+            "droidproof.signingCertificateChainPath requires signing keys."
         }
         require(emulatorPort in 5554..5682 && emulatorPort % 2 == 0) {
             "droidproof.emulatorPort must be an even emulator port from 5554 through 5682."
@@ -66,7 +70,7 @@ data class RunSmokeScenarioConfiguration(
                 "signingPrivateKeyPath", "signingPublicKeyPath", "environmentPath", "environmentMode",
                 "recoveryStateRoot", "avdName", "emulatorPath", "emulatorPort", "lifecycleStartupTimeoutMillis",
                 "lifecycleShutdownTimeoutMillis", "provisioningPath", "sdkRoot", "provisioningStateRoot",
-                "avdManagerPath", "version", "emulatorBackend", "androidCliPath",
+                "avdManagerPath", "version", "emulatorBackend", "androidCliPath", "signingCertificateChainPath",
             )
 
         fun parse(arguments: Array<String>): RunSmokeScenarioConfiguration {
@@ -125,6 +129,7 @@ data class RunSmokeScenarioConfiguration(
                     else -> throw IllegalArgumentException("droidproof.emulatorBackend must be legacy or android-cli.")
                 },
                 optional("androidCliPath")?.let(Path::of),
+                optional("signingCertificateChainPath")?.let(Path::of),
             )
         }
     }
