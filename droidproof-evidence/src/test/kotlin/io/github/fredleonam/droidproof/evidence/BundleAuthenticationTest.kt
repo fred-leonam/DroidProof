@@ -22,12 +22,28 @@ import io.github.fredleonam.droidproof.model.UtcTimestamp
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import org.bouncycastle.asn1.x500.X500Name
+import org.bouncycastle.asn1.x509.BasicConstraints
+import org.bouncycastle.asn1.x509.CRLReason
+import org.bouncycastle.asn1.x509.Extension
+import org.bouncycastle.asn1.x509.KeyUsage
+import org.bouncycastle.cert.jcajce.JcaX509CRLConverter
+import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter
+import org.bouncycastle.cert.jcajce.JcaX509v2CRLBuilder
+import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder
+import org.bouncycastle.jce.provider.BouncyCastleProvider
+import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
 import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.KeyPair
 import java.security.KeyPairGenerator
+import java.security.Security
+import java.security.cert.X509CRL
+import java.security.cert.X509Certificate
+import java.time.Instant
 import java.util.Base64
+import java.util.Date
 import kotlin.io.path.readText
 import kotlin.io.path.writeText
 import kotlin.test.Test
@@ -172,6 +188,81 @@ class BundleAuthenticationTest {
     }
 
     @Test
+    fun `certificate authentication validates included and omitted anchors with current CRLs`() {
+        val pki = TestPki()
+        val configuration = pki.configuration(pki.currentCrls())
+
+        val omitted =
+            verifier.verify(
+                writeBundle("certificate-omitted", pki.signing(false)),
+                BundleVerificationConfiguration(certificate = configuration),
+            )
+        val included =
+            verifier.verify(
+                writeBundle("certificate-included", pki.signing(true)),
+                BundleVerificationConfiguration(certificate = configuration),
+            )
+
+        listOf(omitted, included).forEach { result ->
+            assertEquals(AuthenticationStatus.AUTHENTICATED, result.authentication.status)
+            assertEquals(AuthenticationCheck.GOOD, result.authentication.chainTrust)
+            assertEquals(AuthenticationCheck.GOOD, result.authentication.revocation)
+        }
+    }
+
+    @Test
+    fun `strict certificate policies reject direct key and unsigned bundles`() {
+        val pki = TestPki()
+        val trust = pki.configuration(emptyList(), requireTrust = true)
+        val revocation = pki.configuration(emptyList(), requireRevocation = true)
+        val direct = writeBundle("direct-strict", signing(keys))
+        val unsigned = writeBundle("unsigned-strict")
+
+        listOf(
+            verifier.verify(direct, BundleVerificationConfiguration(keys.public, trust)),
+            verifier.verify(direct, BundleVerificationConfiguration(keys.public, revocation)),
+            verifier.verify(unsigned, BundleVerificationConfiguration(certificate = trust)),
+            verifier.verify(unsigned, BundleVerificationConfiguration(certificate = revocation)),
+        ).forEach { result ->
+            assertEquals(AuthenticationStatus.INVALID, result.authentication.status)
+            assertTrue(result.authentication.issues.any { it.code == AuthenticationIssueCode.STRICT_CERTIFICATE_TRUST_REQUIRED })
+        }
+    }
+
+    @Test
+    fun `strict good revocation requires current authentic CRLs for every non-anchor certificate`() {
+        val pki = TestPki()
+        val bundle = writeBundle("revocation-strict", pki.signing(false))
+        val cases =
+            listOf(
+                pki.configuration(emptyList(), requireRevocation = true),
+                pki.configuration(pki.currentCrls(nextUpdate = null), requireRevocation = true),
+                pki.configuration(pki.currentCrls(expired = true), requireRevocation = true),
+                pki.configuration(pki.currentCrls().dropLast(1), requireRevocation = true),
+                pki.configuration(pki.currentCrls(forgeIntermediateCrl = true), requireRevocation = true),
+            )
+
+        cases.forEach { configuration ->
+            val result = verifier.verify(bundle, BundleVerificationConfiguration(certificate = configuration))
+            assertEquals(AuthenticationStatus.INVALID, result.authentication.status)
+            assertEquals(AuthenticationCheck.UNKNOWN, result.authentication.revocation)
+            assertTrue(result.authentication.issues.any { it.code == AuthenticationIssueCode.STRICT_GOOD_REVOCATION_REQUIRED })
+        }
+    }
+
+    @Test
+    fun `revoked leaf or intermediate never authenticates the producer`() {
+        val pki = TestPki()
+        val bundle = writeBundle("revoked", pki.signing(false))
+        listOf(pki.currentCrls(revokedLeaf = true), pki.currentCrls(revokedIntermediate = true)).forEach { crls ->
+            val result = verifier.verify(bundle, BundleVerificationConfiguration(certificate = pki.configuration(crls)))
+            assertEquals(AuthenticationStatus.SIGNED_UNTRUSTED, result.authentication.status)
+            assertEquals(AuthenticationCheck.REVOKED, result.authentication.revocation)
+            assertTrue(result.authentication.issues.any { it.code == AuthenticationIssueCode.REVOCATION_REVOKED })
+        }
+    }
+
+    @Test
     fun `key loader accepts bounded DER and PEM keys and rejects symbolic links`() {
         val privateDer = directory.resolve("private.der").also { Files.write(it, keys.private.encoded) }
         val publicDer = directory.resolve("public.der").also { Files.write(it, keys.public.encoded) }
@@ -247,6 +338,103 @@ class BundleAuthenticationTest {
     }
 
     private fun signing(keyPair: KeyPair) = BundleSigningConfiguration(keyPair.private, keyPair.public)
+
+    private class TestPki {
+        private companion object {
+            init {
+                Security.addProvider(BouncyCastleProvider())
+            }
+        }
+
+        private val evaluationTime = Instant.parse("2026-09-15T12:00:00Z")
+        private val rootKeys = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
+        private val intermediateKeys = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
+        private val leafKeys = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
+        val root = certificate("CN=DroidProof Test Root", rootKeys, null, null, true)
+        val intermediate = certificate("CN=DroidProof Test Intermediate", intermediateKeys, root, rootKeys, true)
+        val leaf = certificate("CN=DroidProof Test Leaf", leafKeys, intermediate, intermediateKeys, false)
+
+        fun signing(includeAnchor: Boolean) =
+            BundleSigningConfiguration(
+                leafKeys.private,
+                leaf.publicKey,
+                listOf(leaf, intermediate) + if (includeAnchor) listOf(root) else emptyList(),
+            )
+
+        fun configuration(
+            crls: List<X509CRL>,
+            requireTrust: Boolean = false,
+            requireRevocation: Boolean = false,
+        ) = CertificateVerificationConfiguration(setOf(root), crls, evaluationTime, requireTrust, requireRevocation)
+
+        fun currentCrls(
+            nextUpdate: Date? = Date.from(evaluationTime.plusSeconds(3600)),
+            expired: Boolean = false,
+            revokedLeaf: Boolean = false,
+            revokedIntermediate: Boolean = false,
+            forgeIntermediateCrl: Boolean = false,
+        ): List<X509CRL> {
+            val thisUpdate = Date.from(evaluationTime.minusSeconds(60))
+            val effectiveNextUpdate = if (expired) Date.from(evaluationTime.minusSeconds(1)) else nextUpdate
+            val intermediateIssuer =
+                if (forgeIntermediateCrl) {
+                    KeyPairGenerator.getInstance(
+                        "Ed25519",
+                    ).generateKeyPair()
+                } else {
+                    intermediateKeys
+                }
+            return listOf(
+                crl(intermediate, intermediateIssuer, thisUpdate, effectiveNextUpdate, if (revokedLeaf) leaf.serialNumber else null),
+                crl(root, rootKeys, thisUpdate, effectiveNextUpdate, if (revokedIntermediate) intermediate.serialNumber else null),
+            )
+        }
+
+        private fun certificate(
+            subject: String,
+            subjectKeys: KeyPair,
+            issuer: X509Certificate?,
+            issuerKeys: KeyPair?,
+            ca: Boolean,
+        ): X509Certificate {
+            val issuerName = issuer?.subjectX500Principal?.name ?: subject
+            val builder =
+                JcaX509v3CertificateBuilder(
+                    X500Name(issuerName),
+                    java.math.BigInteger.valueOf(serial++),
+                    Date.from(evaluationTime.minusSeconds(3600)),
+                    Date.from(evaluationTime.plusSeconds(3600)),
+                    X500Name(subject),
+                    subjectKeys.public,
+                )
+            builder.addExtension(Extension.basicConstraints, true, BasicConstraints(ca))
+            builder.addExtension(
+                Extension.keyUsage,
+                true,
+                KeyUsage(if (ca) KeyUsage.keyCertSign or KeyUsage.cRLSign else KeyUsage.digitalSignature),
+            )
+            return JcaX509CertificateConverter().setProvider("BC").getCertificate(
+                builder.build(JcaContentSignerBuilder("Ed25519").setProvider("BC").build(issuerKeys?.private ?: subjectKeys.private)),
+            )
+        }
+
+        private fun crl(
+            issuer: X509Certificate,
+            issuerKeys: KeyPair,
+            thisUpdate: Date,
+            nextUpdate: Date?,
+            revoked: java.math.BigInteger?,
+        ): X509CRL {
+            val builder = JcaX509v2CRLBuilder(issuer.subjectX500Principal, thisUpdate)
+            nextUpdate?.let(builder::setNextUpdate)
+            revoked?.let { builder.addCRLEntry(it, thisUpdate, CRLReason.unspecified) }
+            return JcaX509CRLConverter().setProvider("BC").getCRL(
+                builder.build(JcaContentSignerBuilder("Ed25519").setProvider("BC").build(issuerKeys.private)),
+            )
+        }
+
+        private var serial = 1L
+    }
 
     private fun writePem(
         path: Path,
