@@ -206,7 +206,10 @@ class EvidenceBundleVerifier internal constructor(private val files: Verificatio
         val certificateConfiguration = configuration.certificate
         val path = root.resolve(AUTHENTICITY_FILE)
         if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
-            return if (trustedPublicKey == null && certificateConfiguration?.requireCertificateTrust != true) {
+            if (certificateConfiguration?.requiresCertificatePath == true) {
+                return strictCertificatePathRequired(null, certificateConfiguration)
+            }
+            return if (trustedPublicKey == null && certificateConfiguration?.requiresCertificatePath != true) {
                 BundleAuthenticationResult(AuthenticationStatus.UNSIGNED)
             } else {
                 invalid(
@@ -416,6 +419,9 @@ class EvidenceBundleVerifier internal constructor(private val files: Verificatio
             )
         }
         if (chain.isEmpty()) {
+            if (certificateConfiguration?.requiresCertificatePath == true) {
+                return strictCertificatePathRequired(envelope, certificateConfiguration)
+            }
             return BundleAuthenticationResult(
                 AuthenticationStatus.AUTHENTICATED,
                 envelope.algorithm,
@@ -424,11 +430,12 @@ class EvidenceBundleVerifier internal constructor(private val files: Verificatio
             )
         }
         val certificateResult = validateCertificateChain(chain, certificateConfiguration)
+        val requireCertificatePath = certificateConfiguration?.requiresCertificatePath == true
         val failedRequired =
-            (certificateConfiguration?.requireCertificateTrust == true && certificateResult.chainTrust != AuthenticationCheck.GOOD) ||
+            (requireCertificatePath && certificateResult.chainTrust != AuthenticationCheck.GOOD) ||
                 (certificateConfiguration?.requireGoodRevocation == true && certificateResult.revocation != AuthenticationCheck.GOOD)
         val strictIssues = certificateResult.issues.toMutableList()
-        if (certificateConfiguration?.requireCertificateTrust == true && certificateResult.chainTrust != AuthenticationCheck.GOOD) {
+        if (requireCertificatePath && certificateResult.chainTrust != AuthenticationCheck.GOOD) {
             strictIssues.add(
                 AuthenticationIssue(
                     AuthenticationIssueCode.STRICT_CERTIFICATE_TRUST_REQUIRED,
@@ -447,7 +454,10 @@ class EvidenceBundleVerifier internal constructor(private val files: Verificatio
         return BundleAuthenticationResult(
             if (failedRequired) {
                 AuthenticationStatus.INVALID
-            } else if (certificateResult.chainTrust == AuthenticationCheck.GOOD) {
+            } else if (
+                certificateResult.chainTrust == AuthenticationCheck.GOOD &&
+                certificateResult.revocation != AuthenticationCheck.REVOKED
+            ) {
                 AuthenticationStatus.AUTHENTICATED
             } else {
                 AuthenticationStatus.SIGNED_UNTRUSTED
@@ -467,6 +477,52 @@ class EvidenceBundleVerifier internal constructor(private val files: Verificatio
         val revocation: AuthenticationCheck,
         val issues: List<AuthenticationIssue>,
     )
+
+    private fun strictCertificatePathRequired(
+        envelope: BundleAuthenticationEnvelope?,
+        configuration: CertificateVerificationConfiguration,
+    ): BundleAuthenticationResult {
+        val issues = mutableListOf<AuthenticationIssue>()
+        if (envelope == null) {
+            issues.add(
+                AuthenticationIssue(
+                    AuthenticationIssueCode.AUTHENTICATION_REQUIRED,
+                    "Trusted authentication was requested but no signature is present.",
+                ),
+            )
+        }
+        issues.addAll(
+            listOf(
+                AuthenticationIssue(
+                    AuthenticationIssueCode.CERTIFICATE_CHAIN_MISSING,
+                    "Verification policy requires a version 2 certificate authentication envelope.",
+                    AUTHENTICITY_FILE,
+                ),
+                AuthenticationIssue(
+                    AuthenticationIssueCode.STRICT_CERTIFICATE_TRUST_REQUIRED,
+                    "Verification policy requires a trusted certificate chain.",
+                ),
+            ),
+        )
+        if (configuration.requireGoodRevocation) {
+            issues.add(
+                AuthenticationIssue(
+                    AuthenticationIssueCode.STRICT_GOOD_REVOCATION_REQUIRED,
+                    "Verification policy requires current good revocation evidence from a trusted certificate path.",
+                ),
+            )
+        }
+        return BundleAuthenticationResult(
+            AuthenticationStatus.INVALID,
+            envelope?.algorithm,
+            envelope?.keyId,
+            issues,
+            if (envelope == null) AuthenticationCheck.NOT_CHECKED else AuthenticationCheck.GOOD,
+            AuthenticationCheck.FAILED,
+            AuthenticationCheck.NOT_CHECKED,
+            configuration.evaluationTime,
+        )
+    }
 
     private fun decodeChain(envelope: BundleAuthenticationEnvelope): List<X509Certificate>? {
         try {
@@ -535,9 +591,15 @@ class EvidenceBundleVerifier internal constructor(private val files: Verificatio
                     isRevocationEnabled = false
                     date = time
                 }
-            CertPathValidator.getInstance(
-                "PKIX",
-            ).validate(CertificateFactory.getInstance("X.509").generateCertPath(pathCertificates), parameters)
+            val validation =
+                CertPathValidator.getInstance(
+                    "PKIX",
+                ).validate(CertificateFactory.getInstance("X.509").generateCertPath(pathCertificates), parameters)
+            val anchor =
+                (validation as java.security.cert.PKIXCertPathValidatorResult).trustAnchor.trustedCert
+                    ?: throw IllegalArgumentException("Configured trust anchor has no certificate.")
+            val validatedPath = pathCertificates + anchor
+            return certificateResultWithRevocation(validatedPath, configuration)
         } catch (_: Exception) {
             return CertificateResult(
                 AuthenticationCheck.FAILED,
@@ -551,9 +613,15 @@ class EvidenceBundleVerifier internal constructor(private val files: Verificatio
                 ),
             )
         }
-        return CertificateResult(
+    }
+
+    private fun certificateResultWithRevocation(
+        validatedPath: List<X509Certificate>,
+        configuration: CertificateVerificationConfiguration,
+    ): CertificateResult =
+        CertificateResult(
             AuthenticationCheck.GOOD,
-            evaluateRevocation(chain, configuration.crls, configuration.evaluationTime),
+            evaluateRevocation(validatedPath, configuration.crls, configuration.evaluationTime),
             emptyList(),
         ).let {
                 result ->
@@ -583,7 +651,6 @@ class EvidenceBundleVerifier internal constructor(private val files: Verificatio
                 result
             }
         }
-    }
 
     private fun evaluateRevocation(
         chain: List<X509Certificate>,
@@ -592,16 +659,14 @@ class EvidenceBundleVerifier internal constructor(private val files: Verificatio
     ): AuthenticationCheck {
         if (crls.isEmpty()) return AuthenticationCheck.UNKNOWN
         val at = Date.from(time)
-        for (certificate in chain.dropLast(1)) {
-            val issuer =
-                chain.firstOrNull { it.subjectX500Principal == certificate.issuerX500Principal }
-                    ?: return AuthenticationCheck.UNKNOWN
+        for ((certificate, issuer) in chain.zipWithNext()) {
             val usable =
                 crls.filter { crl ->
                     try {
                         crl.issuerX500Principal == issuer.subjectX500Principal &&
                             !crl.thisUpdate.after(at) &&
-                            crl.nextUpdate?.before(at) != true &&
+                            crl.nextUpdate?.let { !it.before(at) } == true &&
+                            issuer.keyUsage?.getOrNull(6) != false &&
                             run {
                                 crl.verify(issuer.publicKey)
                                 true

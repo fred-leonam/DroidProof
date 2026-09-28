@@ -15,7 +15,7 @@ droidproof report --bundle saved-bundle --output report.html \
   --require-certificate-trust --require-good-revocation
 ```
 
-The report separately displays bundle integrity, signature validity, certificate-chain trust, revocation status, and evaluation time. Missing or stale CRLs are `UNKNOWN`, never good; strict policy writes a diagnostic-only report when required trust checks fail. A local signing run may include `--signing-certificate-chain chain.pem` with the existing Ed25519 private and public key options.
+The report separately displays bundle integrity, signature validity, certificate-chain trust, revocation status, and evaluation time. `--require-certificate-trust` and `--require-good-revocation` require a version 2 certificate envelope and a path to an externally configured trust anchor; a version 1 signature with a matching direct public key does not satisfy either policy. Good revocation also requires a current, locally supplied and issuer-authorized CRL for every non-anchor certificate in the validated path. Missing, forged, stale, or no-`nextUpdate` CRLs are `UNKNOWN`, never good. A revoked path never receives an authenticated producer claim. Strict-policy failure writes a diagnostic-only report and makes the CLI or Gradle report task fail. A local signing run may include `--signing-certificate-chain chain.pem` with the existing Ed25519 private and public key options.
 
 DroidProof does not yet provide trusted timestamping, transparency logging, KMS/HSM integration, remote attestation, or historical non-revocation. These are separate future milestones.
 
@@ -470,7 +470,7 @@ Then authenticate while producing the report:
   -Pdroidproof.trustedPublicKeyPath="$DROIDPROOF_KEY_DIR/public-key.pem"
 ```
 
-Never commit the private key. The bundle does not include a public key, so trust must come from outside the bundle. Signing is limited producer provenance; it is not a certificate system, timestamping, revocation, remote attestation, or proof that observations are true.
+Never commit the private key. Version 1 bundles do not include a public key, so direct-key trust must come from outside the bundle. Version 2 bundles carry a certificate chain, but that chain is trusted only when validated against externally supplied anchors. Signing is limited producer provenance; it is not trusted timestamping, historical non-revocation, transparency, KMS/HSM custody, remote attestation, or proof that observations are true.
 
 ## Environment modes and recovery
 
@@ -497,10 +497,10 @@ Recovery only writes when a fresh API level, build fingerprint, and boot identif
 | Network | One controlled loopback `POST /orders` endpoint with ordered response, request-contract, and bounded v5 delay/connection-close faults |
 | Target lifecycle | External device, existing AVD, or narrowly owned legacy-SDK provisioned AVD |
 | Reports | Deterministic, offline static HTML generated only from verified evidence |
-| Authentication | Optional JDK 17 Ed25519 signature with caller-supplied external public key |
+| Authentication | Version 1 Ed25519 direct-key authentication and version 2 certificate-chain authentication against local external anchors, with local offline CRL evaluation |
 | Distribution | Installable CLI, publishable Gradle plugin, and Kotlin scenario-authoring DSL |
 
-Not implemented: arbitrary endpoint scripting, TLS MITM or general traffic interception, Espresso probes, PKI/revocation/timestamping, KMS/HSM integration, and remote attestation. The sample supports only explicit loopback TLS termination; it does not install a CA or redirect traffic.
+Not implemented: arbitrary endpoint scripting, TLS MITM or general traffic interception, Espresso probes, trusted timestamping, historical non-revocation, transparency, KMS/HSM custody, and remote attestation. The sample supports only explicit loopback TLS termination; it does not install a CA or redirect traffic.
 
 ### Compose semantics assertions
 

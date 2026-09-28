@@ -1,6 +1,8 @@
 package io.github.fredleonam.droidproof.report
 
+import io.github.fredleonam.droidproof.evidence.AuthenticationStatus
 import io.github.fredleonam.droidproof.evidence.BundleSigningConfiguration
+import io.github.fredleonam.droidproof.evidence.CertificateVerificationConfiguration
 import io.github.fredleonam.droidproof.evidence.EvidenceBundleRequest
 import io.github.fredleonam.droidproof.evidence.EvidenceBundleRequestV3
 import io.github.fredleonam.droidproof.evidence.EvidenceBundleVerifier
@@ -402,6 +404,26 @@ class EvidenceReportGeneratorTest {
         assertContainsAll(failedHtml, "Bundle verification failed", "TRUSTED_KEY_ID_MISMATCH")
         assertFalse(failedHtml.contains("smoke-report-run"))
         assertFalse(failedHtml.contains("<img"))
+    }
+
+    @Test
+    fun `strict certificate policy writes only a diagnostic report for a direct-key bundle`() {
+        val keys = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
+        val bundle = writeV3Bundle("strict-direct-key", signing = keys)
+        val report = directory.resolve("strict-direct-key.html")
+
+        val result =
+            generator.generate(
+                bundle,
+                report,
+                keys.public,
+                CertificateVerificationConfiguration(requireCertificateTrust = true),
+            )
+
+        assertEquals(AuthenticationStatus.INVALID, result.verification.authentication.status)
+        assertTrue(report.readText().contains("STRICT_CERTIFICATE_TRUST_REQUIRED"))
+        assertFalse(report.readText().contains("smoke-report-run"))
+        assertFalse(report.readText().contains("<img"))
     }
 
     @Test

@@ -57,7 +57,10 @@ data class CertificateVerificationConfiguration(
     val evaluationTime: java.time.Instant = java.time.Instant.now(),
     val requireCertificateTrust: Boolean = false,
     val requireGoodRevocation: Boolean = false,
-)
+) {
+    /** Good offline revocation evidence is meaningful only for a trusted version 2 certificate path. */
+    val requiresCertificatePath: Boolean get() = requireCertificateTrust || requireGoodRevocation
+}
 
 data class BundleVerificationConfiguration(
     val trustedPublicKey: PublicKey? = null,
