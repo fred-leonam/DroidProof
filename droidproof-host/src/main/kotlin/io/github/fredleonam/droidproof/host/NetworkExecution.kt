@@ -106,7 +106,7 @@ internal class ActiveNetworkSession(
                     evaluation =
                         NetworkEvaluationDocument(
                             NetworkEvaluationOutcome.NOT_EVALUATED,
-                            plan.responsePlan.size,
+                            plan.serverPlan().plannedExchangeCount,
                             0,
                             detail = "Controlled mock-server observations could not be inspected.",
                         ),
@@ -133,11 +133,13 @@ internal class ActiveNetworkSession(
                     exchange.responseStatus,
                     destination,
                     exchange.requestContract.outcome,
+                    exchange.plannedExchangeId,
+                    exchange.plannedExchangePosition,
                 )
             events += exchange.timelineEvent(destination)
         }
         val requestCollectionUnavailable =
-            plan.mockServerExpectedRequest != null &&
+            (plan is ScenarioBackendPlanV7 || plan.mockServerExpectedRequest != null) &&
                 exchanges.any { it.requestContract.outcome == RequestContractOutcome.NOT_EVALUATED }
         val matched = !requestCollectionUnavailable && matchesPlan(exchanges)
         val outcome =
@@ -150,7 +152,7 @@ internal class ActiveNetworkSession(
             evaluation =
                 NetworkEvaluationDocument(
                     outcome,
-                    plan.responsePlan.size,
+                    plan.serverPlan().plannedExchangeCount,
                     exchanges.size,
                     summaries,
                     if (requestCollectionUnavailable) {
@@ -172,41 +174,74 @@ internal class ActiveNetworkSession(
     }
 
     private fun matchesPlan(exchanges: List<ObservedHttpExchange>): Boolean =
-        exchanges.size == plan.responsePlan.size &&
-            exchanges.zip(plan.responsePlan).withIndex().all { (zeroBased, pair) ->
+        if (plan is ScenarioBackendPlanV7) {
+            matchesV7(exchanges, plan)
+        } else {
+            exchanges.size == plan.responsePlan.size &&
+                exchanges.zip(plan.responsePlan).withIndex().all { (zeroBased, pair) ->
+                    val (observed, expected) = pair
+                    val expectedResponse = expected.body.toByteArray(StandardCharsets.UTF_8)
+                    val expectedRequest = plan.mockServerExpectedRequest?.bodyBytesForHost()
+                    val expectedDrop = expected.fault?.kind == ResponseFaultKind.DROP_CONNECTION
+                    observed.sequence == zeroBased + 1 &&
+                        observed.matchedResponsePlan &&
+                        observed.responsePlanIndex == zeroBased + 1 &&
+                        observed.methodComplete &&
+                        observed.pathComplete &&
+                        observed.method == plan.method &&
+                        observed.path == plan.path &&
+                        observed.responseStatus == expected.status &&
+                        observed.injectedFault == expected.fault &&
+                        observed.responseDelivered != expectedDrop &&
+                        (
+                            if (expectedDrop) {
+                                observed.responseBody.capturedByteSize == 0L && !observed.responseBody.complete
+                            } else {
+                                observed.responseBody.capturedByteSize == expectedResponse.size.toLong() &&
+                                    observed.responseBody.sha256 ==
+                                    Sha256Calculator.calculate(ByteArrayInputStream(expectedResponse)).value &&
+                                    observed.responseBody.complete
+                            }
+                        ) &&
+                        observed.requestBody.complete &&
+                        (
+                            expectedRequest == null ||
+                                (
+                                    observed.requestContract.outcome == RequestContractOutcome.MATCHED &&
+                                        observed.requestBody.capturedByteSize == expectedRequest.size.toLong() &&
+                                        observed.requestBody.sha256 ==
+                                        Sha256Calculator.calculate(ByteArrayInputStream(expectedRequest)).value
+                                )
+                        )
+                }
+        }
+
+    private fun matchesV7(
+        exchanges: List<ObservedHttpExchange>,
+        v7: ScenarioBackendPlanV7,
+    ): Boolean =
+        exchanges.size == v7.exchanges.size &&
+            exchanges.zip(v7.exchanges).withIndex().all { (index, pair) ->
                 val (observed, expected) = pair
-                val expectedResponse = expected.body.toByteArray(StandardCharsets.UTF_8)
-                val expectedRequest = plan.mockServerExpectedRequest?.bodyBytesForHost()
-                val expectedDrop = expected.fault?.kind == ResponseFaultKind.DROP_CONNECTION
-                observed.sequence == zeroBased + 1 &&
-                    observed.matchedResponsePlan &&
-                    observed.responsePlanIndex == zeroBased + 1 &&
-                    observed.methodComplete &&
-                    observed.pathComplete &&
-                    observed.method == plan.method &&
-                    observed.path == plan.path &&
-                    observed.responseStatus == expected.status &&
-                    observed.injectedFault == expected.fault &&
-                    observed.responseDelivered != expectedDrop &&
+                val response = expected.response
+                val responseBytes = response.body.toByteArray(StandardCharsets.UTF_8)
+                val dropped = response.fault?.kind == ResponseFaultKind.DROP_CONNECTION
+                observed.sequence == index + 1 &&
+                    observed.plannedExchangeId == expected.id &&
+                    observed.plannedExchangePosition == index + 1 &&
+                    observed.methodComplete && observed.pathComplete &&
+                    observed.method == expected.method && observed.path == expected.target &&
+                    observed.requestContract.outcome == RequestContractOutcome.MATCHED &&
+                    observed.matchedResponsePlan && observed.responsePlanIndex == index + 1 &&
+                    observed.responseStatus == response.status && observed.injectedFault == response.fault &&
+                    observed.responseDelivered != dropped &&
                     (
-                        if (expectedDrop) {
-                            observed.responseBody.capturedByteSize == 0L && !observed.responseBody.complete
+                        if (dropped) {
+                            !observed.responseBody.complete
                         } else {
-                            observed.responseBody.capturedByteSize == expectedResponse.size.toLong() &&
-                                observed.responseBody.sha256 ==
-                                Sha256Calculator.calculate(ByteArrayInputStream(expectedResponse)).value &&
-                                observed.responseBody.complete
+                            observed.responseBody.complete && observed.responseBody.capturedByteSize == responseBytes.size.toLong() &&
+                                observed.responseBody.sha256 == Sha256Calculator.calculate(ByteArrayInputStream(responseBytes)).value
                         }
-                    ) &&
-                    observed.requestBody.complete &&
-                    (
-                        expectedRequest == null ||
-                            (
-                                observed.requestContract.outcome == RequestContractOutcome.MATCHED &&
-                                    observed.requestBody.capturedByteSize == expectedRequest.size.toLong() &&
-                                    observed.requestBody.sha256 ==
-                                    Sha256Calculator.calculate(ByteArrayInputStream(expectedRequest)).value
-                            )
                     )
             }
 }
@@ -233,6 +268,8 @@ private fun ObservedHttpExchange.timelineEvent(path: BundleRelativePath): Timeli
                 "requestComplete" to requestBody.complete.toString(),
                 "requestContractOutcome" to requestContract.outcome.name,
                 "requestContractIssues" to requestContract.issues.joinToString(",") { it.name },
+                "plannedExchangeId" to (plannedExchangeId ?: ""),
+                "plannedExchangePosition" to (plannedExchangePosition?.toString() ?: ""),
             ),
         evidence = listOf(EvidenceReference(path, "application/json")),
     )

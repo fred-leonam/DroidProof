@@ -3,6 +3,7 @@ package io.github.fredleonam.droidproof.scenario
 import io.github.fredleonam.droidproof.host.AssertComposeSemantics
 import io.github.fredleonam.droidproof.host.SmokeScenarioLoader
 import io.github.fredleonam.droidproof.host.SmokeScenarioV6
+import io.github.fredleonam.droidproof.host.SmokeScenarioV7
 import io.github.fredleonam.droidproof.mockserver.ResponseFaultKind
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
@@ -11,6 +12,33 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 
 class ScenarioDslTest {
+    @Test
+    fun `writes schema v7 ordered exchanges accepted by the strict runner loader`() {
+        val document =
+            scenario {
+                id = "catalog-order"
+                packageName = "com.example.app"
+                backend {
+                    exchange("catalog") {
+                        method = "GET"
+                        target = "/catalog?lang=en&sort=name"
+                        respond(200, "{}")
+                    }
+                    exchange("order") {
+                        method = "POST"
+                        target = "/orders"
+                        expectJson("{\"customer\":\"Proof42\"}")
+                        respond(201, "{}")
+                    }
+                }
+                assertText("status", "Ready")
+            }
+        val path = document.writeTo(createTempDirectory("droidproof-dsl").resolve("scenario.json"))
+        val loaded = SmokeScenarioLoader.load(path).scenario as SmokeScenarioV7
+        assertEquals(7, loaded.schemaVersion)
+        assertEquals(listOf("catalog", "order"), requireNotNull(loaded.backendPlan).exchanges.map { it.id })
+    }
+
     @Test
     fun `writes deterministic schema v6 JSON accepted by the strict runner loader`() {
         val document = completeScenario()

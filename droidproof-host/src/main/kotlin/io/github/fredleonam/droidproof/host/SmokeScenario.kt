@@ -1,6 +1,7 @@
 package io.github.fredleonam.droidproof.host
 
 import io.github.fredleonam.droidproof.evidence.Sha256Calculator
+import io.github.fredleonam.droidproof.mockserver.ExpectedHttpExchange
 import io.github.fredleonam.droidproof.mockserver.ExpectedHttpRequest
 import io.github.fredleonam.droidproof.mockserver.MockServerLimits
 import io.github.fredleonam.droidproof.mockserver.MockServerPlan
@@ -57,6 +58,34 @@ interface BackendPlanDefinition {
             responseBodyLimitBytes,
             responsePlan.size + EXTRA_EXCHANGE_ALLOWANCE,
         )
+}
+
+/** Schema v7's finite globally ordered endpoint contracts. */
+@Serializable
+data class ScenarioExchange(
+    val id: String,
+    val method: String,
+    val target: String,
+    val expectedRequest: ScenarioExpectedRequest? = null,
+    val response: PlannedHttpResponse,
+) {
+    fun serverContract() = ExpectedHttpExchange(id, method, target, expectedRequest?.serverContract(), response)
+}
+
+@Serializable
+data class ScenarioBackendPlanV7(
+    override val devicePort: Int,
+    val exchanges: List<ScenarioExchange>,
+    override val requestBodyLimitBytes: Long,
+    override val responseBodyLimitBytes: Long,
+    override val transport: NetworkTransport = NetworkTransport.HTTP,
+) : BackendPlanDefinition {
+    override val method: String get() = exchanges.firstOrNull()?.method ?: "POST"
+    override val path: String get() = exchanges.firstOrNull()?.target ?: "/orders"
+    override val responsePlan: List<PlannedHttpResponse> get() = exchanges.map { it.response }
+
+    override fun serverPlan(): MockServerPlan =
+        MockServerPlan(method, path, responsePlan, null, transport, exchanges.map { it.serverContract() })
 }
 
 @Serializable
@@ -286,6 +315,25 @@ data class SmokeScenarioV6(
     }
 }
 
+/** Schema v7 adds ordered GET/POST exchange contracts while retaining v1-v6 unchanged. */
+@Serializable
+data class SmokeScenarioV7(
+    override val schemaVersion: Int,
+    override val scenarioId: ScenarioId,
+    override val expectedPackage: String,
+    override val launchComponent: String,
+    override val backendPlan: ScenarioBackendPlanV7? = null,
+    val steps: List<ScenarioStep>,
+) : ScenarioDefinition {
+    override val orderedSteps: List<ScenarioStep> get() = steps
+
+    init {
+        require(schemaVersion == 7) { "Unsupported scenario schema version." }
+        backendPlan?.let { validateBackendPlanV7(it) }
+        validateOrderedScenario(expectedPackage, launchComponent, steps, allowComposeSemantics = true)
+    }
+}
+
 @Serializable
 data class SmokeScenario(
     override val schemaVersion: Int,
@@ -371,9 +419,35 @@ object SmokeScenarioLoader {
                 4 -> scenarioJson.decodeFromString<SmokeScenarioV4>(text)
                 5 -> scenarioJson.decodeFromString<SmokeScenarioV5>(text)
                 6 -> scenarioJson.decodeFromString<SmokeScenarioV6>(text)
+                7 -> scenarioJson.decodeFromString<SmokeScenarioV7>(text)
                 else -> error("Unsupported scenario schema version: $version.")
             }
         return AcceptedScenario(scenario, bytes, Sha256Calculator.calculate(ByteArrayInputStream(bytes)))
+    }
+}
+
+private fun validateBackendPlanV7(plan: ScenarioBackendPlanV7) {
+    require(plan.devicePort in 1024..65535) { "Device backend port must be between 1024 and 65535." }
+    require(plan.requestBodyLimitBytes in 1..MAX_NETWORK_BODY_BYTES) { "Request-body limit is outside supported bounds." }
+    require(plan.responseBodyLimitBytes in 1..MAX_NETWORK_BODY_BYTES) { "Response-body limit is outside supported bounds." }
+    require(plan.exchanges.size in 1..16) { "An exchange plan must contain 1 to 16 exchanges." }
+    require(plan.exchanges.map { it.id }.distinct().size == plan.exchanges.size) { "Exchange IDs must be unique." }
+    plan.exchanges.forEach { exchange ->
+        exchange.serverContract() // validates method and exact origin-form target
+        exchange.expectedRequest?.let { expected ->
+            require(expected.body.toByteArray(StandardCharsets.UTF_8).size.toLong() <= plan.requestBodyLimitBytes) {
+                "Expected request body exceeds the configured request-body limit."
+            }
+        }
+        require(exchange.response.mediaType == "application/json") { "Scenario-v7 responses must use application/json." }
+        require(
+            runCatching {
+                scenarioJson.parseToJsonElement(exchange.response.body)
+            }.isSuccess,
+        ) { "Scenario-v7 response bodies must be valid JSON." }
+        require(exchange.response.body.toByteArray(StandardCharsets.UTF_8).size.toLong() <= plan.responseBodyLimitBytes) {
+            "Planned response body exceeds the configured response-body limit."
+        }
     }
 }
 

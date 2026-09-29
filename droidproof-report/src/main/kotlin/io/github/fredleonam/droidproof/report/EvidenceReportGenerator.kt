@@ -562,13 +562,14 @@ class EvidenceReportGenerator {
                 return@buildString
             }
             appendLine(
-                "<div class=\"table-scroll\"><table><thead><tr><th>Sequence</th><th>Method</th>" +
+                "<div class=\"table-scroll\"><table><thead><tr><th>Sequence</th><th>Plan exchange</th><th>Method</th>" +
                     "<th>Path</th><th>Request contract</th><th>Request bytes</th><th>Request SHA-256</th>" +
                     "<th>Response status</th><th>Injected fault</th><th>Response delivered</th>" +
                     "<th>Verified exchange evidence</th></tr></thead><tbody>",
             )
             exchanges.forEachIndexed { index, event ->
                 append("<tr><td>${Html.escape(event.attributes["serverSequence"] ?: (index + 1).toString())}</td>")
+                append("<td>${Html.escape(event.attributes["plannedExchangeId"]?.ifEmpty { "Unavailable" } ?: "Unavailable")}</td>")
                 append("<td>${Html.escape(event.attributes["method"] ?: "Unavailable")}</td>")
                 append("<td>${Html.escape(event.attributes["path"] ?: "Unavailable")}</td>")
                 append("<td>${Html.escape(event.attributes["requestContractOutcome"] ?: "Unavailable")}")

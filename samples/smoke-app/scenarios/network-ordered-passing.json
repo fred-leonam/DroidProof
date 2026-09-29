@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 7,
+  "scenarioId": "smoke-network-ordered-passing",
+  "expectedPackage": "io.github.fredleonam.droidproof.smokeapp",
+  "launchComponent": "io.github.fredleonam.droidproof.smokeapp/io.github.fredleonam.droidproof.smokeapp.MainActivity",
+  "backendPlan": {
+    "devicePort": 38637,
+    "requestBodyLimitBytes": 4096,
+    "responseBodyLimitBytes": 4096,
+    "transport": "HTTPS",
+    "exchanges": [
+      {"id":"catalog-load","method":"GET","target":"/catalog","response":{"status":200,"body":"{\"items\":[\"starter\"]}"}},
+      {"id":"order-submit","method":"POST","target":"/orders","expectedRequest":{"mediaType":"application/json; charset=utf-8","body":"{\"customer\":\"Catalog42\"}"},"response":{"status":201,"body":"{\"orderId\":\"catalog-42\"}"}}
+    ]
+  },
+  "steps": [
+    {"type":"typeTextUiNode","resourceId":"io.github.fredleonam.droidproof.smokeapp:id/name","text":"Catalog42"},
+    {"type":"tapUiNode","resourceId":"io.github.fredleonam.droidproof.smokeapp:id/order_action"},
+    {"type":"assertUiNode","resourceId":"io.github.fredleonam.droidproof.smokeapp:id/status","text":"Order catalog-42 created","deadlineMillis":15000,"pollIntervalMillis":250}
+  ]
+}

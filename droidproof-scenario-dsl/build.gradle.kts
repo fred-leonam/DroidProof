@@ -29,7 +29,7 @@ tasks.test {
 
 tasks.register<JavaExec>("generateExternalConsumerScenario") {
     group = "verification"
-    description = "Generates the schema-v6 scenario used by the isolated plugin consumer check."
+    description = "Generates the schema-v7 scenario used by the isolated plugin consumer check."
     classpath = sourceSets.main.get().runtimeClasspath
     mainClass.set("io.github.fredleonam.droidproof.scenario.GenerateExternalConsumerScenarioKt")
     args(
@@ -46,7 +46,7 @@ publishing {
             artifactId = "droidproof-scenario-dsl"
             pom {
                 name.set("DroidProof Scenario DSL")
-                description.set("Typed Kotlin authoring DSL for DroidProof scenario schema v6.")
+                description.set("Typed Kotlin authoring DSL for DroidProof scenario schema v7.")
                 url.set("https://github.com/fred-leonam/DroidProof")
             }
         }

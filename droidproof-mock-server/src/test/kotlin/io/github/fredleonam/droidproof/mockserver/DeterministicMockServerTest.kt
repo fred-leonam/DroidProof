@@ -38,6 +38,75 @@ class DeterministicMockServerTest {
     }
 
     @Test
+    fun `v7 matches ordered bodyless GET then exact POST and never consumes a mismatch`() {
+        val server =
+            DeterministicMockServer(clock).start(
+                MockServerPlan(
+                    "POST",
+                    "/orders",
+                    emptyList(),
+                    exchanges =
+                        listOf(
+                            ExpectedHttpExchange("catalog", "GET", "/catalog?lang=en&sort=name", null, PlannedHttpResponse(200, "{}")),
+                            ExpectedHttpExchange(
+                                "order",
+                                "POST",
+                                "/orders",
+                                ExpectedHttpRequest(EXPECTED_MEDIA_TYPE, EXPECTED_BODY),
+                                PlannedHttpResponse(201, "{}"),
+                            ),
+                        ),
+                ),
+                MockServerLimits(maxExchangeCount = 8),
+            )
+        try {
+            assertEquals(409, request(server.hostPort, "POST", "/orders", EXPECTED_BODY, EXPECTED_MEDIA_TYPE).first)
+            assertEquals(200, request(server.hostPort, "GET", "/catalog?lang=en&sort=name", "").first)
+            assertEquals(409, request(server.hostPort, "POST", "/orders", WRONG_SAME_LENGTH_BODY, EXPECTED_MEDIA_TYPE).first)
+            assertEquals(201, request(server.hostPort, "POST", "/orders", EXPECTED_BODY, EXPECTED_MEDIA_TYPE).first)
+            val observed = server.inspectExchanges()
+            assertEquals(listOf("catalog", "catalog", "order", "order"), observed.map { it.plannedExchangeId })
+            assertEquals(
+                listOf(
+                    RequestContractOutcome.MISMATCHED,
+                    RequestContractOutcome.MATCHED,
+                    RequestContractOutcome.MISMATCHED,
+                    RequestContractOutcome.MATCHED,
+                ),
+                observed.map {
+                    it.requestContract.outcome
+                },
+            )
+            assertEquals(listOf(false, true, false, true), observed.map { it.matchedResponsePlan })
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun `v7 rejects malformed targets and bodyless requests carrying bytes`() {
+        assertFailsWith<IllegalArgumentException> {
+            ExpectedHttpExchange("bad", "GET", "https://example.test/catalog", null, PlannedHttpResponse(200, "{}"))
+        }
+        val server =
+            DeterministicMockServer(clock).start(
+                MockServerPlan(
+                    "POST",
+                    "/orders",
+                    emptyList(),
+                    exchanges = listOf(ExpectedHttpExchange("catalog", "GET", "/catalog", null, PlannedHttpResponse(200, "{}"))),
+                ),
+                MockServerLimits(maxExchangeCount = 2),
+            )
+        try {
+            assertEquals(409, request(server.hostPort, "POST", "/catalog", "x").first)
+            assertEquals(200, request(server.hostPort, "GET", "/catalog", "").first)
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
     fun `wrong method path and extra request are bounded observations and do not alter the plan`() {
         val server = start()
         try {
