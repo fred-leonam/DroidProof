@@ -75,6 +75,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun submitOrder(name: String): String {
+        // A separate deterministic demo flow exercises an ordered GET then POST contract.
+        if (name == "Catalog42" && runCatching { getCatalog() }.getOrNull()?.status != 200) return getString(R.string.order_failed)
         repeat(2) { attempt ->
             val response = runCatching { postOrder(name) }.getOrNull()
             if (response == null) {
@@ -95,7 +97,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun postOrder(name: String): HttpResponse {
-        val connection = URL("https://127.0.0.1:$DROIDPROOF_DEVICE_PORT/orders").openConnection() as HttpURLConnection
+        val connection = openConnection("/orders")
         connection.connectTimeout = NETWORK_TIMEOUT_MILLIS
         connection.readTimeout = NETWORK_TIMEOUT_MILLIS
         connection.requestMethod = "POST"
@@ -113,6 +115,24 @@ class MainActivity : ComponentActivity() {
             connection.disconnect()
         }
     }
+
+    private fun getCatalog(): HttpResponse {
+        val connection = openConnection("/catalog")
+        connection.requestMethod = "GET"
+        return try {
+            val status = connection.responseCode
+            val input = if (status >= 400) connection.errorStream else connection.inputStream
+            HttpResponse(status, input?.use { readBounded(it) }?.toString(Charsets.UTF_8).orEmpty())
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun openConnection(target: String): HttpURLConnection =
+        (URL("https://127.0.0.1:$DROIDPROOF_DEVICE_PORT$target").openConnection() as HttpURLConnection).apply {
+            connectTimeout = NETWORK_TIMEOUT_MILLIS
+            readTimeout = NETWORK_TIMEOUT_MILLIS
+        }
 
     private fun readBounded(input: java.io.InputStream): ByteArray {
         val output = ByteArrayOutputStream()

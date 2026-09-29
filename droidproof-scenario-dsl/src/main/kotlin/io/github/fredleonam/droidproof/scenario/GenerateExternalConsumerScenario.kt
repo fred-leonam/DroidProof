@@ -8,8 +8,17 @@ fun main(arguments: Array<String>) {
         id = "consumer-proof"
         packageName = "com.example.consumer"
         backend {
-            expectJson("{\"customer\":\"Proof42\"}")
-            respond(201, "{\"orderId\":\"42\"}")
+            exchange("catalog") {
+                method = "GET"
+                target = "/catalog"
+                respond(200, "{\"items\":[]}")
+            }
+            exchange("order") {
+                method = "POST"
+                target = "/orders"
+                expectJson("{\"customer\":\"Proof42\"}")
+                respond(201, "{\"orderId\":\"42\"}")
+            }
         }
         typeText("customer", "Proof42")
         tap("submit")

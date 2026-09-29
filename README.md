@@ -401,11 +401,11 @@ droidProof {
 }
 ```
 
-`droidProofRun` executes the configured scenario, `droidProofValidateScenario` validates it without Android, and `droidProofReport` verifies `bundle` and writes `report`. The external verification generates a schema-v6 scenario with the DSL, validates it through the plugin, and creates a report from synthetic evidence. The plugin artifact is `io.github.fredleonam.droidproof:droidproof-gradle-plugin`.
+`droidProofRun` executes the configured scenario, `droidProofValidateScenario` validates it without Android, and `droidProofReport` verifies `bundle` and writes `report`. The external verification generates a schema-v7 scenario with the DSL, validates it through the plugin, and creates a report from synthetic evidence. The plugin artifact is `io.github.fredleonam.droidproof:droidproof-gradle-plugin`.
 
 ### Kotlin scenario DSL
 
-The `droidproof-scenario-dsl` artifact creates validated schema-v6 JSON and supports all current UI, Compose, loopback transport, response, and bounded-fault declarations:
+The `droidproof-scenario-dsl` artifact creates validated schema-v7 JSON when ordered exchanges are used (and retains schema-v6 output for the existing backend form):
 
 ```kotlin
 import io.github.fredleonam.droidproof.scenario.Transport
@@ -428,7 +428,23 @@ scenario {
 }.writeTo(Path.of("scenarios/release-proof.json"))
 ```
 
-Resource names are expanded to `<packageName>:id/<name>`; fully qualified resource IDs are also accepted. Focused tests cover deterministic output, JSON round trips through the strict `SmokeScenarioLoader`, Compose assertions, backend responses and bounded faults, and representative invalid declarations. The external plugin consumer also validates a DSL-generated schema-v6 file.
+Resource names are expanded to `<packageName>:id/<name>`; fully qualified resource IDs are also accepted. Focused tests cover deterministic output, JSON round trips through the strict `SmokeScenarioLoader`, Compose assertions, backend responses and bounded faults, and representative invalid declarations. The external plugin consumer also validates a DSL-generated schema-v7 file.
+
+An ordered v7 backend uses one loopback base URL and one ADB-reversed device port. Targets are exact raw origin-form path/query strings: percent encoding and query parameter order are significant.
+
+```kotlin
+backend {
+    transport = Transport.HTTPS
+    exchange("catalog-load") { method = "GET"; target = "/catalog"; respond(200, """{"items":["starter"]}""") }
+    exchange("order-submit") {
+        method = "POST"; target = "/orders"
+        expectJson("""{"customer":"Catalog42"}""")
+        respond(201, """{"orderId":"catalog-42"}""")
+    }
+}
+```
+
+The sample app assumes its controlled base URL is `https://127.0.0.1:38637`. `network-ordered-passing.json` demonstrates `GET /catalog` followed by `POST /orders`; `network-ordered-failing.json` deliberately uses an exact request-body mismatch.
 
 ## Optional: sign and authenticate a bundle
 
@@ -494,7 +510,7 @@ Recovery only writes when a fresh API level, build fingerprint, and boot identif
 | Evidence | Schema v1/v2/v3 reader and verifier; v3 execution bundles; SHA-256 inventory |
 | Android capture | Bounded screenshots, allowlisted metadata, optional PID-filtered logcat |
 | UI execution | Narrow View resource-ID input/tap/assertion and bounded Compose accessibility-semantics assertions |
-| Network | One controlled loopback `POST /orders` endpoint with ordered response, request-contract, and bounded v5 delay/connection-close faults |
+| Network | One controlled loopback backend with finite ordered GET/POST exchange contracts, exact request contracts, and bounded delay/connection-close faults; generalized endpoint scripting remains partial |
 | Target lifecycle | External device, existing AVD, or narrowly owned legacy-SDK provisioned AVD |
 | Reports | Deterministic, offline static HTML generated only from verified evidence |
 | Authentication | Version 1 Ed25519 direct-key authentication and version 2 certificate-chain authentication against local external anchors, with local offline CRL evaluation |
@@ -514,7 +530,7 @@ This is an accessibility-semantics observation. It does not execute Espresso ass
 
 ## Contracts and safety boundaries
 
-- Scenario schemas v1–v5 remain readable. V4 adds strict matching for the single controlled JSON request; V5 adds bounded delay and connection-close faults for that same endpoint; V6 adds Compose accessibility-semantics assertions and permits scenarios without a backend plan.
+- Scenario schemas v1–v6 remain readable. V7 adds finite ordered GET/POST exchange contracts with exact raw targets and optional exact JSON request bodies; v1-v6 keep their original single-endpoint behavior.
 - Environment contracts, environment evaluations, capability observations, continuity observations, transaction-mutation observations, evidence, and authentication each have separate versioned schemas.
 - A matching environment or checkpoint is a sequential point observation. It does not prove stability between checks, actor identity, exclusive ownership, or the absence of unrelated changes.
 - The mock server proves only what it observed on its controlled endpoint. It does not prove that no other network traffic occurred.

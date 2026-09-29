@@ -82,6 +82,8 @@ data class NetworkExchangeSummary(
     val responseStatus: Int,
     val evidencePath: BundleRelativePath,
     val requestContractOutcome: RequestContractOutcome = RequestContractOutcome.NOT_EVALUATED,
+    val plannedExchangeId: String? = null,
+    val plannedExchangePosition: Int? = null,
 )
 
 @Serializable

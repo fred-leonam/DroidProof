@@ -70,13 +70,48 @@ data class MockServerPlan(
     val responses: List<PlannedHttpResponse>,
     val expectedRequest: ExpectedHttpRequest? = null,
     val transport: NetworkTransport = NetworkTransport.HTTP,
+    /** v7 ordered contracts. When absent, the v3-v6 single-route semantics are retained. */
+    val exchanges: List<ExpectedHttpExchange>? = null,
 ) {
     init {
-        require(method in SUPPORTED_METHODS) { "Only the POST method is supported by this milestone." }
-        require(path == "/orders") { "Only the /orders endpoint is supported by this milestone." }
-        require(responses.size in 1..MAX_RESPONSES) { "A response plan must contain 1 to $MAX_RESPONSES responses." }
+        if (exchanges == null) {
+            require(method in LEGACY_SUPPORTED_METHODS) { "Only the POST method is supported by this milestone." }
+            require(path == "/orders") { "Only the /orders endpoint is supported by this milestone." }
+            require(responses.size in 1..MAX_RESPONSES) { "A response plan must contain 1 to $MAX_RESPONSES responses." }
+        } else {
+            require(exchanges.size in 1..MAX_RESPONSES) { "An exchange plan must contain 1 to $MAX_RESPONSES exchanges." }
+            require(exchanges.map { it.id }.distinct().size == exchanges.size) { "Exchange IDs must be unique." }
+        }
+    }
+
+    internal val effectiveExchanges: List<ExpectedHttpExchange>
+        get() =
+            exchanges ?: responses.mapIndexed { index, response ->
+                ExpectedHttpExchange("legacy-${index + 1}", method, path, expectedRequest, response, legacy = true)
+            }
+    val plannedExchangeCount: Int get() = effectiveExchanges.size
+}
+
+/** A finite v7 contract, matched only against the next unconsumed exchange. */
+data class ExpectedHttpExchange(
+    val id: String,
+    val method: String,
+    val target: String,
+    val expectedRequest: ExpectedHttpRequest? = null,
+    val response: PlannedHttpResponse,
+    internal val legacy: Boolean = false,
+) {
+    init {
+        require(id.matches(Regex("[A-Za-z][A-Za-z0-9_.-]{0,63}"))) { "Exchange ID must be stable and safe." }
+        require(method in SUPPORTED_METHODS) { "Only GET and POST methods are supported." }
+        require(isValidOriginFormTarget(target)) { "Exchange target must be a bounded origin-form path and query." }
     }
 }
+
+private fun isValidOriginFormTarget(value: String): Boolean =
+    value.length in 1..MAX_TARGET_CHARACTERS && value.startsWith('/') &&
+        !value.startsWith("//") && !value.contains('#') && !value.any { it.code < 0x20 || it.code == 0x7f } &&
+        !value.contains(Regex("^[A-Za-z][A-Za-z0-9+.-]*:"))
 
 /** Transport is declared by the scenario; TLS is only available on DroidProof's loopback server. */
 enum class NetworkTransport { HTTP, HTTPS }
@@ -133,6 +168,7 @@ enum class RequestContractIssue {
     BODY_SHA256_MISMATCH,
     BODY_INCOMPLETE,
     BODY_LIMIT_EXCEEDED,
+    EXTRA_REQUEST,
 }
 
 @Serializable
@@ -158,6 +194,8 @@ data class ObservedHttpExchange(
     val pathComplete: Boolean = true,
     val requestContract: RequestContractEvaluation =
         RequestContractEvaluation(RequestContractOutcome.NOT_EVALUATED),
+    val plannedExchangeId: String? = null,
+    val plannedExchangePosition: Int? = null,
 )
 
 fun interface MockServerStarter {
@@ -183,17 +221,18 @@ class DeterministicMockServer(private val clock: Clock = Clock.systemUTC()) : Mo
         plan: MockServerPlan,
         limits: MockServerLimits,
     ): RunningMockServer {
-        plan.responses.forEach { response ->
+        plan.effectiveExchanges.forEach { planned ->
+            val response = planned.response
             require(response.body.toByteArray(StandardCharsets.UTF_8).size.toLong() <= limits.responseBodyLimitBytes) {
                 "Planned response body exceeds the configured response-body limit."
             }
         }
-        plan.expectedRequest?.let { expected ->
+        plan.effectiveExchanges.mapNotNull { it.expectedRequest }.forEach { expected ->
             require(expected.bodyBytes.size.toLong() <= limits.requestBodyLimitBytes) {
                 "Expected request body exceeds the configured request-body limit."
             }
         }
-        require(limits.maxExchangeCount >= plan.responses.size) {
+        require(limits.maxExchangeCount >= plan.effectiveExchanges.size) {
             "Exchange-count limit must be at least the response-plan size."
         }
         val executor =
@@ -331,7 +370,7 @@ private class ServerState(
             val observedTarget = target.take(MAX_TARGET_CHARACTERS)
             val decision =
                 synchronized(lock) {
-                    val selected = decide(exchange.requestMethod, target, request.observation.complete)
+                    val selected = decide(exchange.requestMethod, target, exchange.requestHeaders["Content-Type"].orEmpty(), request)
                     exchanges +=
                         ObservedHttpExchange(
                             sequence = selected.sequence,
@@ -347,19 +386,21 @@ private class ServerState(
                                 ),
                             responseDelivered = selected.fault?.kind != ResponseFaultKind.DROP_CONNECTION,
                             injectedFault = selected.fault,
-                            matchedResponsePlan = selected.planIndex != null,
+                            matchedResponsePlan = selected.consumed,
                             responsePlanIndex = selected.planIndex,
                             methodComplete = observedMethod.length == exchange.requestMethod.length,
                             pathComplete = observedTarget.length == target.length,
                             requestContract =
-                                evaluateRequestContract(
-                                    plan,
-                                    limits.requestBodyLimitBytes,
-                                    exchange.requestMethod,
-                                    target,
-                                    exchange.requestHeaders["Content-Type"].orEmpty(),
-                                    request,
-                                ),
+                                if (plan.exchanges == null) {
+                                    evaluateRequestContract(
+                                        plan, limits.requestBodyLimitBytes, exchange.requestMethod, target,
+                                        exchange.requestHeaders["Content-Type"].orEmpty(), request,
+                                    )
+                                } else {
+                                    selected.contract
+                                },
+                            plannedExchangeId = selected.exchangeId,
+                            plannedExchangePosition = selected.planIndex,
                         )
                     selected
                 }
@@ -386,11 +427,13 @@ private class ServerState(
     private fun decide(
         method: String,
         path: String,
-        completeRequest: Boolean,
+        contentTypes: List<String>,
+        request: BoundedBodyRead,
     ): ResponseDecision {
         val sequence = exchanges.size + 1
         if (sequence > limits.maxExchangeCount) return ResponseDecision(sequence, 429, EMPTY_BODY, JSON_MEDIA_TYPE)
-        if (!completeRequest) return ResponseDecision(sequence, 413, EMPTY_BODY, JSON_MEDIA_TYPE)
+        if (plan.exchanges != null) return decideV7(sequence, method, path, contentTypes, request)
+        if (!request.observation.complete) return ResponseDecision(sequence, 413, EMPTY_BODY, JSON_MEDIA_TYPE)
         if (path != plan.path) return ResponseDecision(sequence, 404, EMPTY_BODY, JSON_MEDIA_TYPE)
         if (method != plan.method) return ResponseDecision(sequence, 405, EMPTY_BODY, JSON_MEDIA_TYPE)
         if (nextResponse >= plan.responses.size) return ResponseDecision(sequence, 409, EMPTY_BODY, JSON_MEDIA_TYPE)
@@ -403,6 +446,56 @@ private class ServerState(
             planned.mediaType,
             index + 1,
             planned.fault,
+            evaluateRequestContract(plan, limits.requestBodyLimitBytes, method, path, contentTypes, request),
+        )
+    }
+
+    private fun decideV7(
+        sequence: Int,
+        method: String,
+        path: String,
+        contentTypes: List<String>,
+        request: BoundedBodyRead,
+    ): ResponseDecision {
+        if (!request.observation.complete) {
+            return ResponseDecision(
+                sequence,
+                413,
+                EMPTY_BODY,
+                JSON_MEDIA_TYPE,
+                contract = unavailableContract(request),
+            )
+        }
+        val planned =
+            plan.effectiveExchanges.getOrNull(nextResponse)
+                ?: return ResponseDecision(
+                    sequence, 409, EMPTY_BODY, JSON_MEDIA_TYPE,
+                    contract = RequestContractEvaluation(RequestContractOutcome.MISMATCHED, listOf(RequestContractIssue.EXTRA_REQUEST)),
+                )
+        val contract = evaluateExchangeContract(planned, method, path, contentTypes, request)
+        if (contract.outcome != RequestContractOutcome.MATCHED) {
+            // A v7 mismatch is observed but never receives the declared success response or consumes the queue.
+            return ResponseDecision(
+                sequence,
+                409,
+                EMPTY_BODY,
+                JSON_MEDIA_TYPE,
+                contract = contract,
+                exchangeId = planned.id,
+                planIndex = nextResponse + 1,
+                consumed = false,
+            )
+        }
+        nextResponse++
+        return ResponseDecision(
+            sequence,
+            planned.response.status,
+            planned.response.body.toByteArray(StandardCharsets.UTF_8),
+            planned.response.mediaType,
+            nextResponse,
+            planned.response.fault,
+            contract,
+            planned.id,
         )
     }
 }
@@ -414,6 +507,9 @@ private data class ResponseDecision(
     val mediaType: String,
     val planIndex: Int? = null,
     val fault: ResponseFault? = null,
+    val contract: RequestContractEvaluation = RequestContractEvaluation(RequestContractOutcome.NOT_EVALUATED),
+    val exchangeId: String? = null,
+    val consumed: Boolean = planIndex != null,
 )
 
 internal data class BoundedBodyRead(
@@ -498,6 +594,59 @@ internal fun evaluateRequestContract(
     )
 }
 
+private fun unavailableContract(request: BoundedBodyRead): RequestContractEvaluation =
+    RequestContractEvaluation(
+        RequestContractOutcome.NOT_EVALUATED,
+        listOf(
+            if (request.observation.capturedByteSize > 0) {
+                RequestContractIssue.BODY_LIMIT_EXCEEDED
+            } else {
+                RequestContractIssue.BODY_INCOMPLETE
+            },
+        ),
+    )
+
+internal fun evaluateExchangeContract(
+    expected: ExpectedHttpExchange,
+    method: String,
+    target: String,
+    contentTypes: List<String>,
+    request: BoundedBodyRead,
+): RequestContractEvaluation {
+    val issues = mutableListOf<RequestContractIssue>()
+    if (method != expected.method) issues += RequestContractIssue.METHOD_MISMATCH
+    if (target != expected.target) issues += RequestContractIssue.PATH_MISMATCH
+    val body = expected.expectedRequest
+    if (body == null) {
+        if (contentTypes.isNotEmpty()) issues += RequestContractIssue.MEDIA_TYPE_MISMATCH
+        if (!request.observation.complete) return unavailableContract(request)
+        if (request.bytes.isNotEmpty()) issues += RequestContractIssue.BODY_SIZE_MISMATCH
+    } else {
+        when {
+            contentTypes.isEmpty() -> issues += RequestContractIssue.MEDIA_TYPE_MISSING
+            contentTypes.size != 1 -> issues += RequestContractIssue.MEDIA_TYPE_MALFORMED
+            else ->
+                when (parseSafeMediaType(contentTypes.single())) {
+                    null -> issues += RequestContractIssue.MEDIA_TYPE_MALFORMED
+                    body.parsedMediaType -> Unit
+                    else -> issues += RequestContractIssue.MEDIA_TYPE_MISMATCH
+                }
+        }
+        if (!request.observation.complete) {
+            return RequestContractEvaluation(
+                RequestContractOutcome.NOT_EVALUATED,
+                issues + unavailableContract(request).issues,
+            )
+        }
+        if (request.bytes.size != body.bodyBytes.size) {
+            issues += RequestContractIssue.BODY_SIZE_MISMATCH
+        } else if (!MessageDigest.isEqual(sha256(request.bytes), sha256(body.bodyBytes))) {
+            issues += RequestContractIssue.BODY_SHA256_MISMATCH
+        }
+    }
+    return RequestContractEvaluation(if (issues.isEmpty()) RequestContractOutcome.MATCHED else RequestContractOutcome.MISMATCHED, issues)
+}
+
 private fun bodyObservation(
     bytes: ByteArray,
     complete: Boolean,
@@ -544,7 +693,8 @@ private const val MAX_MEDIA_TYPE_CHARACTERS = 128
 private const val STOP_TIMEOUT_SECONDS = 5L
 private const val JSON_MEDIA_TYPE = "application/json"
 private val EMPTY_BODY = ByteArray(0)
-private val SUPPORTED_METHODS = setOf("POST")
+private val LEGACY_SUPPORTED_METHODS = setOf("POST")
+private val SUPPORTED_METHODS = setOf("GET", "POST")
 private val MEDIA_TYPE = Regex("[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+")
 private val JSON_MEDIA_TYPE_PATTERN =
     Regex(

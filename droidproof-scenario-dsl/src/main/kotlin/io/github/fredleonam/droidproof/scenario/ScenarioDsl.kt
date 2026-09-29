@@ -3,9 +3,13 @@ package io.github.fredleonam.droidproof.scenario
 import io.github.fredleonam.droidproof.host.AssertComposeSemantics
 import io.github.fredleonam.droidproof.host.AssertUiNode
 import io.github.fredleonam.droidproof.host.ScenarioBackendPlanV4
+import io.github.fredleonam.droidproof.host.ScenarioBackendPlanV7
+import io.github.fredleonam.droidproof.host.ScenarioDefinition
+import io.github.fredleonam.droidproof.host.ScenarioExchange
 import io.github.fredleonam.droidproof.host.ScenarioExpectedRequest
 import io.github.fredleonam.droidproof.host.ScenarioStep
 import io.github.fredleonam.droidproof.host.SmokeScenarioV6
+import io.github.fredleonam.droidproof.host.SmokeScenarioV7
 import io.github.fredleonam.droidproof.host.TapUiNode
 import io.github.fredleonam.droidproof.host.TypeTextUiNode
 import io.github.fredleonam.droidproof.mockserver.NetworkTransport
@@ -24,8 +28,13 @@ import java.nio.file.StandardOpenOption
 annotation class DroidProofScenarioDsl
 
 /** A validated, immutable scenario document ready to save or pass to DroidProof. */
-class ScenarioDocument internal constructor(private val scenario: SmokeScenarioV6) {
-    fun toJson(): String = scenarioJson.encodeToString(scenario) + "\n"
+class ScenarioDocument internal constructor(private val scenario: ScenarioDefinition) {
+    fun toJson(): String =
+        when (scenario) {
+            is SmokeScenarioV6 -> scenarioJson.encodeToString(scenario)
+            is SmokeScenarioV7 -> scenarioJson.encodeToString(scenario)
+            else -> error("The DSL only emits schema v6 or v7 scenarios.")
+        } + "\n"
 
     fun writeTo(path: Path): Path {
         path.toAbsolutePath().parent?.let(Files::createDirectories)
@@ -50,6 +59,7 @@ class ScenarioBuilder internal constructor() {
 
     private val steps = mutableListOf<ScenarioStep>()
     private var backend: ScenarioBackendPlanV4? = null
+    private var backendV7: ScenarioBackendPlanV7? = null
 
     fun typeText(
         resource: String,
@@ -82,11 +92,12 @@ class ScenarioBuilder internal constructor() {
     }
 
     fun backend(block: BackendBuilder.() -> Unit) {
-        check(backend == null) { "A scenario may declare only one backend." }
-        backend = BackendBuilder().apply(block).build()
+        check(backend == null && backendV7 == null) { "A scenario may declare only one backend." }
+        val built = BackendBuilder().apply(block).build()
+        if (built is ScenarioBackendPlanV7) backendV7 = built else backend = built as ScenarioBackendPlanV4
     }
 
-    internal fun build(): SmokeScenarioV6 {
+    internal fun build(): ScenarioDefinition {
         check(::id.isInitialized) { "Scenario id is required." }
         check(::packageName.isInitialized) { "Scenario packageName is required." }
         val component =
@@ -95,7 +106,11 @@ class ScenarioBuilder internal constructor() {
                 '/' in launchActivity -> launchActivity
                 else -> "$packageName/$launchActivity"
             }
-        return SmokeScenarioV6(6, ScenarioId(id), packageName, component, backend, steps.toList())
+        return if (backendV7 != null) {
+            SmokeScenarioV7(7, ScenarioId(id), packageName, component, backendV7, steps.toList())
+        } else {
+            SmokeScenarioV6(6, ScenarioId(id), packageName, component, backend, steps.toList())
+        }
     }
 
     private fun resourceId(resource: String): String = if (":id/" in resource) resource else "$packageName:id/$resource"
@@ -114,6 +129,16 @@ class BackendBuilder internal constructor() {
 
     private var expectedRequest: ScenarioExpectedRequest? = null
     private val responses = mutableListOf<PlannedHttpResponse>()
+    private val exchanges = mutableListOf<ScenarioExchange>()
+
+    /** Adds a v7 contract. Declared exchanges are matched in this exact order. */
+    fun exchange(
+        id: String,
+        block: ExchangeBuilder.() -> Unit,
+    ) {
+        check(responses.isEmpty() && expectedRequest == null) { "Use either legacy expectJson/respond calls or ordered exchanges." }
+        exchanges += ExchangeBuilder(id).apply(block).build()
+    }
 
     fun expectJson(
         body: String,
@@ -140,16 +165,73 @@ class BackendBuilder internal constructor() {
         responses += PlannedHttpResponse(status, body, mediaType, fault)
     }
 
-    internal fun build(): ScenarioBackendPlanV4 =
-        ScenarioBackendPlanV4(
-            devicePort,
+    internal fun build(): Any =
+        if (exchanges.isNotEmpty()) {
+            ScenarioBackendPlanV7(
+                devicePort,
+                exchanges.toList(),
+                requestBodyLimitBytes,
+                responseBodyLimitBytes,
+                NetworkTransport.valueOf(transport.name),
+            )
+        } else {
+            ScenarioBackendPlanV4(
+                devicePort,
+                method,
+                path,
+                requestBodyLimitBytes,
+                responseBodyLimitBytes,
+                requireNotNull(expectedRequest) { "The backend expected JSON request is required." },
+                responses.toList(),
+                NetworkTransport.valueOf(transport.name),
+            )
+        }
+}
+
+@DroidProofScenarioDsl
+class ExchangeBuilder internal constructor(private val id: String) {
+    var method: String = "GET"
+    var target: String = "/"
+    private var expectedRequest: ScenarioExpectedRequest? = null
+    private var response: PlannedHttpResponse? = null
+
+    fun expectJson(
+        body: String,
+        mediaType: String = "application/json; charset=utf-8",
+    ) {
+        check(expectedRequest == null) { "An expected request was already declared." }
+        expectedRequest = ScenarioExpectedRequest(mediaType, body)
+    }
+
+    fun respond(
+        status: Int,
+        body: String,
+        mediaType: String = "application/json",
+        delayMillis: Long? = null,
+        dropConnection: Boolean = false,
+    ) {
+        check(response == null) { "An exchange has one planned response." }
+        require(delayMillis == null || !dropConnection) { "A response cannot be delayed and dropped." }
+        response =
+            PlannedHttpResponse(
+                status, body, mediaType,
+                when {
+                    delayMillis != null -> ResponseFault(ResponseFaultKind.DELAY_RESPONSE, delayMillis)
+                    dropConnection -> ResponseFault(ResponseFaultKind.DROP_CONNECTION)
+                    else -> null
+                },
+            )
+    }
+
+    internal fun build(): ScenarioExchange =
+        ScenarioExchange(
+            id,
             method,
-            path,
-            requestBodyLimitBytes,
-            responseBodyLimitBytes,
-            requireNotNull(expectedRequest) { "The backend expected JSON request is required." },
-            responses.toList(),
-            NetworkTransport.valueOf(transport.name),
+            target,
+            expectedRequest,
+            requireNotNull(response) {
+                "An exchange response is required."
+            },
         )
 }
 
