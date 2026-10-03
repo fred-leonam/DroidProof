@@ -10,7 +10,9 @@ DroidProof has two exclusive target modes. `deviceSerial` uses an externally own
 
 Managed startup is bounded and fails closed: the AVD must be listed before launch; the child process must remain alive; the exact serial must be ADB-visible in `device` state; and `sys.boot_completed` must equal `1`. The normal SmokeAdb preflight and cooperative serial lease then remain unchanged. No AVD or SDK provisioning is performed.
 
-The managed session is closed outside `SmokeCoordinator`, after its network cleanup, environment restoration/recovery finalization, and publication paths have completed. Shutdown uses `adb -s <owned serial> emu kill`, bounded waiting, and force termination only of the exact child process owned by the session. Cleanup failures are suppressed onto an earlier execution failure.
+The cooperative serial lease is acquired before managed provisioning or startup and remains held through scenario execution, environment restoration/recovery finalization, owned-process shutdown, and permitted owned-state removal. A coordinator given that outer lease does not reacquire it; direct coordinator callers still acquire before their first device operation. The lease remains cooperative same-host DroidProof coordination, not ownership or exclusion of arbitrary ADB clients.
+
+An existing caller-selected AVD is never wiped. Only an isolated, positively marked DroidProof-owned provisioning directory receives the clean-baseline `-wipe-data -no-snapshot` launch arguments. Shutdown uses `adb -s <owned serial> emu kill` only as a graceful request, then bounded termination/escalation of the exact child process. Removal is permitted only after that child exit is positively confirmed; uncertain shutdown retains the directory and marker and makes the operation unsuccessful. Cleanup failures are suppressed onto an earlier execution failure.
 
 ## Non-goals and proof boundary
 

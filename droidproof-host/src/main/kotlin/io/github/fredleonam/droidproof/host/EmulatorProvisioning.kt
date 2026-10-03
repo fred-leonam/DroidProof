@@ -163,6 +163,7 @@ class LegacySdkEmulatorProvisioner(
                 "\"avdName\":\"$avdName\",\"ownedDirectory\":\"$key\"}",
             StandardOpenOption.CREATE_NEW,
         )
+        var launchedSession: ManagedEmulatorSession? = null
         try {
             val create =
                 runner.execute(
@@ -203,6 +204,7 @@ class LegacySdkEmulatorProvisioner(
                         mapOf("ANDROID_AVD_HOME" to avdHome.toString()),
                     ),
                 )
+            launchedSession = session
             try {
                 verifyRuntime(session.serial, configuration, contract)
             } catch (error: Throwable) {
@@ -215,10 +217,19 @@ class LegacySdkEmulatorProvisioner(
             }
             return OwnedSession(session, avd, configuration.accepted, marker)
         } catch (error: Throwable) {
-            try {
-                deleteOwned(avd, marker, configuration.accepted)
-            } catch (cleanup: Throwable) {
-                error.addSuppressed(cleanup)
+            // Before a session exists no child process was handed to us, so removal is safe.
+            // Once launched, OwnedSession.close is the sole place allowed to remove state.
+            val uncertainStartup = (error as? EmulatorLifecycleException)?.ownedProcessTerminationConfirmed == false
+            if (launchedSession == null && !uncertainStartup) {
+                try {
+                    deleteOwned(avd, marker, configuration.accepted)
+                } catch (cleanup: Throwable) {
+                    error.addSuppressed(cleanup)
+                }
+            } else if (uncertainStartup) {
+                error.addSuppressed(
+                    EmulatorProvisioningException("Retained owned AVD state at $avd because startup process exit was not confirmed."),
+                )
             }
             throw error
         }
@@ -334,10 +345,19 @@ class LegacySdkEmulatorProvisioner(
             } catch (e: Throwable) {
                 failure = e
             }
-            try {
-                deleteOwned(avdDirectory, marker, accepted)
-            } catch (e: Throwable) {
-                if (failure != null) failure.addSuppressed(e) else throw e
+            val confirmed = (delegate as? OwnedProcessSession)?.terminationConfirmed == true
+            if (confirmed) {
+                try {
+                    deleteOwned(avdDirectory, marker, accepted)
+                } catch (e: Throwable) {
+                    if (failure != null) failure.addSuppressed(e) else throw e
+                }
+            } else {
+                val retained =
+                    EmulatorProvisioningException(
+                        "Retained owned AVD state at $avdDirectory because launched process termination was not confirmed.",
+                    )
+                if (failure != null) failure.addSuppressed(retained) else failure = retained
             }
             if (failure != null) throw failure
         }

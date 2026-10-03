@@ -33,9 +33,13 @@ fun runSmokeScenario(configuration: RunSmokeScenarioConfiguration) {
             recoveryJournalStore = FileEmulatorRecoveryJournalStore(configuration.recoveryStateRoot),
         )
     var session: ManagedEmulatorSession? = null
+    var lease: EmulatorExecutionLease? = null
     var primary: Throwable? = null
     val result =
         try {
+            // The serial is configuration-derived in managed modes.  Acquire before
+            // provisioning/startup so a competing DroidProof run cannot mutate it.
+            lease = FileEmulatorExecutionLeaseProvider().acquire(selectedSerial(configuration))
             session = createSession(configuration, adbPath)
             coordinator.run(
                 SmokeRunRequest(
@@ -48,6 +52,7 @@ fun runSmokeScenario(configuration: RunSmokeScenarioConfiguration) {
                     configuration.replaceExisting,
                     DroidProofVersion(configuration.version),
                 ),
+                requireNotNull(lease),
             )
         } catch (error: Throwable) {
             primary = error
@@ -57,12 +62,17 @@ fun runSmokeScenario(configuration: RunSmokeScenarioConfiguration) {
                 session?.close()
             } catch (cleanup: Throwable) {
                 if (primary != null) primary.addSuppressed(cleanup) else throw cleanup
+            } finally {
+                lease?.close()
             }
         }
     val location = result.output ?: result.diagnostic
     println("DroidProof smoke result: ${result.document?.status ?: "ERROR"} at $location")
     check(result.isSuccessful) { "Smoke scenario did not meet successful task criteria; inspect the preserved local output." }
 }
+
+internal fun selectedSerial(configuration: RunSmokeScenarioConfiguration): String =
+    configuration.deviceSerial ?: "emulator-${configuration.emulatorPort}"
 
 internal fun createSession(
     configuration: RunSmokeScenarioConfiguration,

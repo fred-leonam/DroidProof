@@ -227,8 +227,8 @@ The app still succeeds, but the scenario expects the wrong request body. The bun
 | Target mode | When to use it | Key properties | Ownership behavior |
 | --- | --- | --- | --- |
 | Existing device/emulator | You already started and authorized it | `deviceSerial` | Never started or stopped by DroidProof |
-| Existing AVD | DroidProof should start one known AVD | `avdName`, `emulatorPort` | Stops only the process it started |
-| Provisioned AVD | You need a clean, isolated AVD from installed SDK components | `provisioningPath`, SDK tool paths, state root | Creates, wipes, verifies, stops, and removes only its marked state |
+| Existing AVD | DroidProof should start one known AVD | `avdName`, `emulatorPort` | Preserves its data; stops only the process it started |
+| Provisioned AVD | You need a clean, isolated AVD from installed SDK components | `provisioningPath`, SDK tool paths, state root | Creates and clean-starts marked state; removes it only after confirmed process exit |
 
 `deviceSerial`, `avdName`, and provisioning are mutually exclusive.
 
@@ -281,7 +281,9 @@ Then run:
   -Pdroidproof.provisioningStateRoot=/absolute/path/to/droidproof-owned-avds
 ```
 
-The AVD is started with `-wipe-data` and `-no-snapshot`, checked for the contract’s API/ABI and optional fingerprint, then stopped and removed. This is controlled baseline selection—not remote attestation or universal emulator determinism.
+Only a fresh, positively marked provisioning directory is started with `-wipe-data` and `-no-snapshot`; a caller-selected existing AVD is never wiped. The owned AVD is checked for the contract’s API/ABI and optional fingerprint. Shutdown is bounded and confirms the exact launched process has exited before removal. If that cannot be confirmed, DroidProof retains the marked directory and reports its path and reason as an unsuccessful operation; valid scenario evidence remains available. Environment-setting recovery is a separate transaction/recovery-journal concern, not proof of lifecycle cleanup.
+
+Each run uses a cooperative same-host DroidProof serial lease from managed startup through scenario work, environment restoration, shutdown, and any permitted owned-state cleanup. It coordinates cooperating DroidProof processes only; it does not prove exclusive emulator ownership or exclude other ADB clients and tools. These lifecycle boundaries are locally JVM-tested; they are not a claim of live-host production readiness.
 
 Android CLI can be inspected but is intentionally fail-closed for provisioning:
 
@@ -511,7 +513,7 @@ Recovery only writes when a fresh API level, build fingerprint, and boot identif
 | Android capture | Bounded screenshots, allowlisted metadata, optional PID-filtered logcat |
 | UI execution | Narrow View resource-ID input/tap/assertion and bounded Compose accessibility-semantics assertions |
 | Network | One controlled loopback backend with finite ordered GET/POST exchange contracts, exact request contracts, and bounded delay/connection-close faults; generalized endpoint scripting remains partial |
-| Target lifecycle | External device, existing AVD, or narrowly owned legacy-SDK provisioned AVD |
+| Target lifecycle | External device, data-preserving existing AVD, or narrowly owned legacy-SDK provisioned AVD with bounded confirmed shutdown |
 | Reports | Deterministic, offline static HTML generated only from verified evidence |
 | Authentication | Version 1 Ed25519 direct-key authentication and version 2 certificate-chain authentication against local external anchors, with local offline CRL evaluation |
 | Distribution | Installable CLI, publishable Gradle plugin, and Kotlin scenario-authoring DSL |

@@ -3,6 +3,8 @@ package io.github.fredleonam.droidproof.host
 import io.github.fredleonam.droidproof.device.CommandRequest
 import io.github.fredleonam.droidproof.device.CommandRunner
 import io.github.fredleonam.droidproof.device.ProcessCommandRunner
+import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.util.concurrent.TimeUnit
 
@@ -39,11 +41,22 @@ interface ManagedEmulatorSession : AutoCloseable {
     override fun close()
 }
 
+/** Available only for sessions which launched a child process. */
+interface OwnedProcessSession : ManagedEmulatorSession {
+    /** True only after the exact launched child has been observed to exit. */
+    val terminationConfirmed: Boolean
+}
+
 interface EmulatorLifecycleManager {
     fun start(configuration: EmulatorLifecycleConfiguration): ManagedEmulatorSession
 }
 
-class EmulatorLifecycleException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)
+class EmulatorLifecycleException(
+    message: String,
+    cause: Throwable? = null,
+    /** Null means no child was launched; false means its exit could not be confirmed. */
+    val ownedProcessTerminationConfirmed: Boolean? = null,
+) : RuntimeException(message, cause)
 
 /** Legacy SDK emulator backend. The explicit port makes the serial association deterministic. */
 class LegacyEmulatorLifecycleManager(
@@ -93,22 +106,27 @@ class LegacyEmulatorLifecycleManager(
                     environment = configuration.environment,
                 ),
             )
-        if (before.stdout.lineSequence().any { it.startsWith("$serial\t") }) {
+        val observed = parseDevices(before)
+        if (serial in observed) {
             throw EmulatorLifecycleException("Target emulator serial is already present before launch.")
         }
+        // A failed or ambiguous observation is not evidence that this serial is free.
         val process =
             try {
                 launcher.launch(
                     EmulatorLaunchRequest(
-                        listOf(
-                            configuration.emulatorPath.toString(),
-                            "-avd",
-                            avd,
-                            "-wipe-data",
-                            "-no-snapshot",
-                            "-port",
-                            configuration.port.toString(),
-                        ),
+                        buildList {
+                            add(configuration.emulatorPath.toString())
+                            addAll(
+                                listOf(
+                                    "-avd",
+                                    avd,
+                                    "-port",
+                                    configuration.port.toString(),
+                                ),
+                            )
+                            if (isMarkedOwned(configuration)) addAll(listOf("-wipe-data", "-no-snapshot"))
+                        },
                         configuration.environment,
                     ),
                 )
@@ -130,7 +148,7 @@ class LegacyEmulatorLifecycleManager(
                             environment = configuration.environment,
                         ),
                     )
-                val state = devices.stdout.lineSequence().firstOrNull { it.startsWith("$serial\t") }?.substringAfter('\t')?.trim()
+                val state = runCatching { parseDevices(devices)[serial] }.getOrNull()
                 if (state == "device") {
                     val boot =
                         runner.execute(
@@ -153,7 +171,6 @@ class LegacyEmulatorLifecycleManager(
                             process,
                             configuration,
                             runner,
-                            sleeper,
                         )
                     }
                 }
@@ -161,51 +178,122 @@ class LegacyEmulatorLifecycleManager(
             }
             throw EmulatorLifecycleException("Timed out waiting for ADB and Android boot readiness for $serial.")
         } catch (e: InterruptedException) {
-            process.destroyForcibly()
+            val cleanup = terminate(process, configuration.shutdownTimeoutMillis)
             Thread.currentThread().interrupt()
+            if (cleanup.isFailure) {
+                throw EmulatorLifecycleException(
+                    "Startup was interrupted and the owned emulator process exit could not be confirmed.",
+                    e,
+                    false,
+                ).also { cleanup.exceptionOrNull()?.let(it::addSuppressed) }
+            }
             throw e
         } catch (e: Throwable) {
-            process.destroyForcibly()
+            val cleanup = terminate(process, configuration.shutdownTimeoutMillis)
+            if (cleanup.isFailure) {
+                throw EmulatorLifecycleException(
+                    "Emulator startup failed and the owned emulator process exit could not be confirmed.",
+                    e,
+                    false,
+                ).also { cleanup.exceptionOrNull()?.let(it::addSuppressed) }
+            }
             throw e
         }
     }
+
+    private fun isMarkedOwned(configuration: EmulatorLifecycleConfiguration): Boolean {
+        val directory = configuration.ownedAvdDirectory ?: return false
+        val marker = directory.resolve(".droidproof-owned.json")
+        return Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS) &&
+            Files.isRegularFile(marker, LinkOption.NOFOLLOW_LINKS) && !Files.isSymbolicLink(marker)
+    }
+
+    private fun parseDevices(result: io.github.fredleonam.droidproof.device.CommandResult): Map<String, String> {
+        if (result.failure != null || result.exitCode != 0) {
+            throw EmulatorLifecycleException(
+                "Could not discover ADB devices before launch.",
+            )
+        }
+        val lines = result.stdout.replace("\r\n", "\n").lines()
+        if (lines.firstOrNull()?.trim() != "List of devices attached") {
+            throw EmulatorLifecycleException("ADB device discovery output was malformed.")
+        }
+        return buildMap {
+            lines.drop(1).filter { it.isNotBlank() }.forEach { line ->
+                val parts = line.split('\t')
+                if (parts.size != 2 || !DEVICE_SERIAL.matches(parts[0]) || parts[1].trim() !in setOf("device", "offline", "unauthorized")) {
+                    throw EmulatorLifecycleException("ADB device discovery output was malformed.")
+                }
+                put(parts[0], parts[1].trim())
+            }
+        }
+    }
+
+    private fun terminate(
+        process: Process,
+        timeoutMillis: Long,
+    ): Result<Unit> =
+        runCatching {
+            if (!process.isAlive) return@runCatching
+            var interrupted = false
+
+            fun waitBounded(millis: Long) {
+                try {
+                    process.waitFor(millis.coerceAtLeast(1), TimeUnit.MILLISECONDS)
+                } catch (_: InterruptedException) {
+                    interrupted = true
+                }
+            }
+            waitBounded(timeoutMillis / 3)
+            if (process.isAlive) {
+                process.destroy()
+                waitBounded(timeoutMillis / 3)
+            }
+            if (process.isAlive) {
+                process.destroyForcibly()
+                waitBounded(timeoutMillis - (timeoutMillis / 3 * 2))
+            }
+            if (interrupted) Thread.currentThread().interrupt()
+            if (process.isAlive) throw EmulatorLifecycleException("Owned emulator process exit could not be confirmed.")
+        }
 
     private fun remaining(deadline: Long) = ((deadline - System.nanoTime()) / 1_000_000).coerceAtLeast(1)
 
     private fun error(message: String): Nothing = throw EmulatorLifecycleException(message)
 
-    private class Session(
+    private inner class Session(
         override val serial: String,
         private val process: Process,
         private val configuration: EmulatorLifecycleConfiguration,
         private val runner: CommandRunner,
-        private val sleeper: (Long) -> Unit,
-    ) : ManagedEmulatorSession {
+    ) : OwnedProcessSession {
+        private var closed = false
+        override var terminationConfirmed: Boolean = !process.isAlive
+            private set
+
         override fun close() {
-            if (!process.isAlive) return
-            val result =
-                runner.execute(
-                    CommandRequest(
-                        listOf(configuration.adbPath.toString(), "-s", serial, "emu", "kill"),
-                        configuration.shutdownTimeoutMillis,
-                        environment = configuration.environment,
-                    ),
-                )
-            val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(configuration.shutdownTimeoutMillis)
-            while (process.isAlive && System.nanoTime() < deadline) sleeper(100)
-            if (process.isAlive) {
-                process.destroy()
-                process.waitFor(200, TimeUnit.MILLISECONDS)
+            if (closed) return
+            closed = true
+            if (!process.isAlive) {
+                terminationConfirmed = true
+                return
             }
-            if (process.isAlive) {
-                process.destroyForcibly()
-                process.waitFor(1000, TimeUnit.MILLISECONDS)
-            }
-            if (result.failure != null || result.exitCode != 0 || process.isAlive) {
+            runner.execute(
+                CommandRequest(
+                    listOf(configuration.adbPath.toString(), "-s", serial, "emu", "kill"),
+                    configuration.shutdownTimeoutMillis,
+                    environment = configuration.environment,
+                ),
+            )
+            val termination = terminate(process, configuration.shutdownTimeoutMillis)
+            terminationConfirmed = !process.isAlive
+            if (termination.isFailure || !terminationConfirmed) {
                 throw EmulatorLifecycleException(
-                    "Owned emulator $serial did not shut down cleanly.",
+                    "Owned emulator $serial exit could not be confirmed.",
+                    termination.exceptionOrNull(),
                 )
             }
+            // ADB is only a graceful request. Its failure does not negate confirmed child exit.
         }
     }
 }
