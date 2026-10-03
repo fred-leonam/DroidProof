@@ -57,4 +57,27 @@ class EmulatorLifecycleTest {
         session.close()
         assertEquals("emulator-5554", session.serial)
     }
+
+    @Test
+    fun `failed adb discovery never launches an existing avd`() {
+        var launched = false
+        val manager =
+            LegacyEmulatorLifecycleManager(
+                runner =
+                    CommandRunner { request ->
+                        when (request.arguments.drop(1).first()) {
+                            "-list-avds" -> CommandResult(stdout = "pixel\n", exitCode = 0)
+                            "devices" -> CommandResult(stdout = "List of devices attached\n", exitCode = 1)
+                            else -> error("unexpected command")
+                        }
+                    },
+                launcher =
+                    EmulatorProcessLauncher {
+                        launched = true
+                        error("must not launch")
+                    },
+            )
+        assertFailsWith<EmulatorLifecycleException> { manager.start(config(avd = "pixel")) }
+        assertEquals(false, launched)
+    }
 }

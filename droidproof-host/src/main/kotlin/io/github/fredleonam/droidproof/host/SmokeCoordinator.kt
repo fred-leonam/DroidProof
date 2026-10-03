@@ -104,7 +104,14 @@ class SmokeCoordinator(
     private val recoveryJournalStore: EmulatorRecoveryJournalStore =
         FileEmulatorRecoveryJournalStore(Path.of(System.getProperty("user.home"), ".droidproof", "recovery")),
 ) {
-    fun run(request: SmokeRunRequest): SmokeRunResult {
+    /**
+     * An outer managed lifecycle may supply its already-acquired lease.  It retains
+     * ownership of that lease so it can cover session shutdown as well as this run.
+     */
+    fun run(
+        request: SmokeRunRequest,
+        acquiredLease: EmulatorExecutionLease? = null,
+    ): SmokeRunResult {
         val startedAt = wallClock.instant().toString()
         val executionId = idSource()
         require(SAFE_RUN_ID.matches(executionId)) { "Execution ID must be a lower-case slug." }
@@ -124,7 +131,7 @@ class SmokeCoordinator(
                 val artifact = ArtifactBinder(device, wallClock).snapshot(request.apkPath, workDirectory)
                 val environment = request.environmentPath?.let(EnvironmentContractLoader::load)
                 accepted = AcceptedInputs(scenario, artifact, environment)
-                lease = leaseProvider.acquire(request.deviceSerial)
+                lease = acquiredLease ?: leaseProvider.acquire(request.deviceSerial)
                 val overallBudget =
                     scenario.scenario.orderedSteps.sumOf { it.assertionDeadlineMillisOrZero } +
                         scenario.scenario.orderedSteps.sumOf { it.stepType.deviceOperationCount } * request.commandTimeoutMillis +
@@ -587,7 +594,7 @@ class SmokeCoordinator(
             deleteWorkDirectory(workDirectory)
             return result
         } finally {
-            lease?.close()
+            if (acquiredLease == null) lease?.close()
         }
     }
 

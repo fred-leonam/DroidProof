@@ -77,8 +77,9 @@ class EmulatorProvisioningTest {
                         )
                         assertEquals(1_234L, configuration.startupTimeoutMillis)
                         assertEquals(5_678L, configuration.shutdownTimeoutMillis)
-                        return object : ManagedEmulatorSession {
+                        return object : OwnedProcessSession {
                             override val serial = "emulator-5554"
+                            override val terminationConfirmed get() = true
 
                             override fun close() {
                                 closed++
